@@ -1,230 +1,105 @@
-"""
-agent.py — LangChain Agent Controller + Tool Registry & Executor
-
-Architecture role (matches diagram):
-  User Query
-      ↓
-  LangChain Agent Controller  (this file)
-      ↓
-  LLM (OpenAI G-Functions / ReAct)  ← from llm.py
-      ↓  ↑  (loop until done)
-  Tool Registry & Executor  ← EDA_TOOLS from tools.py
-      ↓
-  Final result dict → Report Generator (next step)
-
-Uses: LangGraph's create_react_agent (modern replacement for AgentExecutor)
-"""
-
 import os
 import glob
-
-from langgraph.prebuilt import create_react_agent
-from langchain_core.messages import HumanMessage, SystemMessage
-
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+import tools
+from tools import load_csv
 from llm import get_llm
-from tools import EDA_TOOLS, load_csv_into_tensor
 
-
-# ---------------------------------------------------------------------------
-# System prompt — tells the LLM its role in the agent loop
-# ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """\
-You are a senior AI Data Scientist. Your job is to explore a CSV dataset and
-discover the MOST INTERESTING patterns, relationships, and anomalies in it.
-
-You have a rich set of chart tools. YOU decide which ones to call and with which
-columns — based on what you learn about the data.
-
-Decision rules you MUST follow:
-1. Always start with get_dataframe_info to learn column names and dtypes.
-2. Run generate_eda_summary to see distributions and missing data.
-3. Identify:
-   - Numeric columns  → use generate_distribution_charts, generate_boxplot_charts,
-                         detect_outliers_report, generate_scatter_comparison, generate_eda_charts(heatmap)
-   - Categorical cols → use generate_countplot for each one
-   - Categorical + Numeric pairs → use generate_barplot_comparison and generate_boxplot_by_category
-     for the most MEANINGFUL combinations (e.g. survival rate by class, price by cut)
-4. For scatter/comparison charts, choose the pair with the HIGHEST expected correlation
-   or the most domain-relevant relationship — do NOT just pick the first two columns.
-5. For hue in scatter, use the most meaningful binary/categorical column.
-6. Generate generate_eda_charts(heatmap) to see ALL correlations.
-7. Generate generate_missing_value_chart to visualise data quality.
-
-Be intelligent. Think like a data scientist — choose the charts that tell the best story.
-"""
-
-# ---------------------------------------------------------------------------
-# Auto-EDA query — LLM drives the analysis, picks columns intelligently
-# ---------------------------------------------------------------------------
-AUTO_EDA_QUERY = (
-    "Perform a COMPLETE intelligent EDA on this dataset.\n\n"
-    "Phase 1 — Understand the data:\n"
-    "  • Call get_dataframe_info to see all columns, dtypes, and sample rows.\n"
-    "  • Call generate_eda_summary to get statistics for all numeric columns.\n"
-    "  • Call analyze_missing_values to check data quality.\n\n"
-    "Phase 2 — Visual data quality:\n"
-    "  • Call generate_missing_value_chart.\n\n"
-    "Phase 3 — Distributions & outliers (generate for ALL numeric columns):\n"
-    "  • Call generate_distribution_charts.\n"
-    "  • Call generate_boxplot_charts.\n"
-    "  • Call detect_outliers_report.\n\n"
-    "Phase 4 — Correlation map:\n"
-    "  • Call generate_eda_charts with plot_type='heatmap'.\n\n"
-    "Phase 5 — YOU decide the best comparisons based on the data:\n"
-    "  • For each categorical column with <= 15 unique values, call generate_countplot.\n"
-    "  • Pick the 2-3 most meaningful (cat, num) pairs and call generate_barplot_comparison.\n"
-    "  • Pick the 2-3 most meaningful (cat, num) pairs and call generate_boxplot_by_category.\n"
-    "  • Pick the most correlated or interesting (x, y) numeric pair and call "
-    "generate_scatter_comparison — optionally add the most relevant categorical column as hue_col.\n\n"
-    "After ALL charts are generated, write 3 bullet points naming the top patterns you found."
-)
-
-
-
-# ---------------------------------------------------------------------------
-# Agent factory
-# ---------------------------------------------------------------------------
-def create_agent():
+def run_analysis(csv_path: str) -> dict:
     """
-    Builds and returns the LangGraph ReAct agent.
-
-    Components wired here:
-      - LLM         : ChatOpenAI (gpt-4o) from llm.py
-      - Tools       : All 6 EDA tools from tools.py (Tool Registry)
-      - Agent type  : ReAct via LangGraph's create_react_agent
-    """
-    llm = get_llm()
-
-    # create_react_agent is the modern LangGraph way to build
-    # an OpenAI function-calling ReAct agent with a tool registry
-    agent = create_react_agent(
-        model=llm,
-        tools=EDA_TOOLS,           # Tool Registry
-        prompt=SYSTEM_PROMPT,      # System-level instructions
-    )
-    return agent
-
-
-# ---------------------------------------------------------------------------
-# Main entry point — called by Streamlit frontend (next step)
-# ---------------------------------------------------------------------------
-def run_analysis(query: str, csv_path: str, chat_history: list = None) -> dict:
-    """
-    Full pipeline:
-      1. Load CSV into PyTorch tensor (via tools.py)
-      2. Run the ReAct agent loop with the user's query
-      3. Return a structured result dict for the Report Generator
-
-    Args:
-        query        : Natural language question from the user
-        csv_path     : Absolute path to the uploaded CSV file
-        chat_history : Optional prior conversation messages (list of dicts)
-
-    Returns:
-        {
-          "answer"      : str  — LLM's final natural-language answer
-          "chart_paths" : list — Paths of any chart images generated
-          "steps"       : list — Tool calls made during the agent loop
-          "success"     : bool
-          "error"       : str | None
-        }
+    Full pipeline using pure LangChain LCEL (Directed Acyclic Graph):
+      1. Load data
+      2. Get context (dataframe info + correlation matrix)
+      3. Create LangChain prompt expecting JSON
+      4. Call LLM sequentially
+      5. Parse output and generate charts
     """
     result = {
-        "answer": "",
-        "chart_paths": [],
-        "steps": [],
         "success": False,
-        "error": None,
+        "answer": "",
+        "steps": [],
+        "chart_paths": [],
     }
 
     try:
-        # Step 1: Load CSV into the PyTorch tensor store in tools.py
-        load_status = load_csv_into_tensor(csv_path)
+
+        load_status = load_csv(csv_path)
         print(f"[Agent] Data load: {load_status}")
+        df = tools._df
 
-        # Step 2: Build the agent
-        agent = create_agent()
+        df_info = tools.get_dataframe_info(df)
+        corr_matrix = tools.get_correlation_matrix(df)
+        result["steps"].append("Computed Dataframe Info and Correlation Matrix")
 
-        # Step 3: Build the message list for the agent
-        messages = [HumanMessage(content=query)]
+        template = """
+You are a senior AI Data Scientist. Your objective is to perform a visual EDA on the uploaded dataset.
+Instead of bombarding the user with all possible graphs, YOUR JOB IS TO FIND THE SINGLE BEST, MOST IMPORTANT PATTERN for each category.
 
-        # Step 4: Run the ReAct loop (agent streams through thoughts + tool calls)
-        print(f"\n[Agent] Running query: {query}")
-        print("-" * 50)
+DATAFRAME INFO:
+{df_info}
 
-        final_response = agent.invoke({"messages": messages})
+CORRELATION MATRIX for NUMERICAL COLUMNS:
+{corr_matrix}
 
-        # Step 5: Extract the final AI answer (last message in the thread)
-        all_messages = final_response.get("messages", [])
+Pick EXACTLY ONE graph for each category that reveals the most important story in this dataset.
+Provide your plan strictly in the following JSON format:
+{{
+  "best_univariate_chart": {{"type": "histogram", "column": "col_name"}},
+  "best_bivariate_chart": {{"type": "scatterplot", "x": "col1", "y": "col2"}},
+  "best_multivariate_chart": {{"type": "boxplot", "x": "cat_col", "y": "num_col"}},
+  "summary": "3 brief bullet points about why you chose these specific relationships."
+}}
+NOTE: For categorical variables, use type "countplot". For continuous, use "histogram".
+"""
+        prompt = PromptTemplate(
+            template=template,
+            input_variables=["df_info", "corr_matrix"]
+        )
+
+        llm = get_llm()
+        llm_json = llm.bind(response_format={"type": "json_object"})
+        parser = JsonOutputParser()
+
+        chain = prompt | llm_json | parser
+
+        print("\n[Agent] Running sequential LCEL chain for top 3 charts...")
+        output = chain.invoke({"df_info": df_info, "corr_matrix": corr_matrix})
+
+        result["steps"].append("LLM decided on the 3 best analysis charts")
+
+        tools.plot_correlation_heatmap(df)
+        result["steps"].append("Plotted correlation heatmap")
+
+        uni = output.get("best_univariate_chart", {})
+        if uni and uni.get("column") in df.columns:
+            if uni.get("type") == "countplot":
+                tools.plot_countplot(df, uni["column"])
+            else:
+                tools.plot_histogram(df, uni["column"])
+
+        bi = output.get("best_bivariate_chart", {})
+        if bi and bi.get("x") in df.columns and bi.get("y") in df.columns:
+            tools.plot_scatterplot(df, bi["x"], bi["y"])
+
+        multi = output.get("best_multivariate_chart", {})
+        if multi and multi.get("x") in df.columns and multi.get("y") in df.columns:
+            tools.plot_boxplot(df, multi["x"], multi["y"])
         
-        # Collect tool call steps for transparency
-        for msg in all_messages:
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    step_info = f"Tool called: {tc['name']} | Input: {tc['args']}"
-                    result["steps"].append(step_info)
-                    print(f"  [Tool] {step_info}")
+        result["steps"].append("Plotted exclusively the top Univariate, Bivariate, and Multivariate patterns")
 
-        # The last message is always the AI's final answer
-        final_msg = all_messages[-1]
-        result["answer"] = final_msg.content
+
+
+        result["answer"] = output.get("summary", "Done running charts.")
         result["success"] = True
 
-        # Step 6: Collect chart paths generated during the run
         charts_dir = os.path.join(os.path.dirname(__file__), "charts")
         if os.path.isdir(charts_dir):
             result["chart_paths"] = sorted(glob.glob(os.path.join(charts_dir, "*.png")))
 
     except Exception as e:
-        result["error"] = str(e)
-        result["answer"] = f"Agent encountered an error: {e}"
-        print(f"[Agent ERROR] {e}")
+        import traceback
+        result["answer"] = f"Runtime Error: {str(e)}\n\n{traceback.format_exc()}"
+        result["success"] = False
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# Quick self-test (run: python agent.py)
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import tempfile
-
-    # Create a sample CSV
-    csv_content = (
-        "age,salary,score,years_exp\n"
-        "25,50000,88.5,2\n"
-        "30,,92.0,5\n"
-        "22,45000,,1\n"
-        "35,60000,75.0,8\n"
-        "28,52000,81.0,3\n"
-    )
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv",
-                                     delete=False, encoding="utf-8") as f:
-        f.write(csv_content)
-        tmp_csv = f.name
-
-    print("=" * 60)
-    print("TEST 1: Dataset overview + missing values")
-    print("=" * 60)
-    out = run_analysis(
-        query="Give me a complete overview of this dataset, check for missing values, and generate a bar chart.",
-        csv_path=tmp_csv,
-    )
-    print("\n--- FINAL ANSWER ---")
-    print(out["answer"])
-    print("\n--- Steps taken ---")
-    for s in out["steps"]:
-        print(" •", s)
-    print("Charts:", out["chart_paths"])
-
-    print("\n" + "=" * 60)
-    print("TEST 2: Specific column stats")
-    print("=" * 60)
-    out2 = run_analysis(
-        query="What are the min, max, and mean of the salary column?",
-        csv_path=tmp_csv,
-    )
-    print("\n--- FINAL ANSWER ---")
-    print(out2["answer"])
-
-    os.unlink(tmp_csv)

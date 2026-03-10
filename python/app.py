@@ -263,26 +263,17 @@ if not st.session_state.csv_name:
 if not st.session_state.done:
     with st.spinner("🤖 Agent is running full EDA — generating all charts…"):
         try:
-            from agent import run_analysis, AUTO_EDA_QUERY
-            from tools import load_csv_into_tensor, generate_eda_summary, \
-                              analyze_missing_values, detect_outliers_report
+            from agent import run_analysis
+            from tools import load_csv
 
             clear_charts()
+            load_csv(st.session_state.csv_path)
+            
             result = run_analysis(
-                query=AUTO_EDA_QUERY,
                 csv_path=st.session_state.csv_path,
             )
             st.session_state.eda_result = result
             st.session_state.done = True
-
-            # Pre-fetch JSON data for tables (bypass agent for speed)
-            try:
-                load_csv_into_tensor(st.session_state.csv_path)
-                st.session_state.stats_json   = json.loads(generate_eda_summary.invoke(""))
-                st.session_state.missing_json = json.loads(analyze_missing_values.invoke(""))
-                st.session_state.outlier_json = json.loads(detect_outliers_report.invoke(""))
-            except Exception:
-                pass
 
         except Exception as e:
             st.session_state.eda_result = {
@@ -293,7 +284,7 @@ if not st.session_state.done:
     st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# REPORT: Tabbed EDA Dashboard
+# REPORT: Simplified Dashboard
 # ─────────────────────────────────────────────────────────────────────────────
 result = st.session_state.eda_result
 if not result:
@@ -305,215 +296,47 @@ if not result["success"]:
 
 # ── Top metric bar ───────────────────────────────────────────────────────────
 n_charts = len(glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png")))
-stats = st.session_state.stats_json or {}
-missing = st.session_state.missing_json or {}
-outliers = st.session_state.outlier_json or {}
 
-n_cols_detected = len(stats)
-total_missing   = sum(v.get("missing_count", 0) for v in missing.values())
-total_outliers  = sum(v.get("outlier_count", 0) for v in outliers.values()
-                      if isinstance(v, dict) and "outlier_count" in v)
-
-m1, m2, m3, m4, m5 = st.columns(5)
-for col, val, lbl, clr in [
-    (m1, st.session_state.csv_name[:14] + "…" if len(st.session_state.csv_name) > 14
-         else st.session_state.csv_name, "Dataset", "#818cf8"),
-    (m2, f"{n_cols_detected}", "Numeric Cols", "#60a5fa"),
-    (m3, f"{total_missing}", "Missing Cells", "#fbbf24" if total_missing > 0 else "#34d399"),
-    (m4, f"{total_outliers}", "Outliers (IQR)", "#f87171" if total_outliers > 0 else "#34d399"),
-    (m5, f"{n_charts}", "Charts Generated", "#34d399"),
-]:
-    with col:
-        st.markdown(f"""
-        <div class="scard">
-            <span class="v" style="color:{clr};">{val}</span>
-            <span class="l">{lbl}</span>
-        </div>""", unsafe_allow_html=True)
+m1, m2 = st.columns(2)
+with m1:
+    st.markdown(f"""
+    <div class="scard">
+        <span class="v" style="color:#818cf8;">{st.session_state.csv_name}</span>
+        <span class="l">Dataset</span>
+    </div>""", unsafe_allow_html=True)
+with m2:
+    st.markdown(f"""
+    <div class="scard">
+        <span class="v" style="color:#34d399;">{n_charts}</span>
+        <span class="l">Charts Generated</span>
+    </div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# ── Key insight (2 sentences from agent) ────────────────────────────────────
-if result["answer"].strip():
-    st.markdown(f'<div class="insight">💡 {result["answer"].strip()}</div>',
-                unsafe_allow_html=True)
-
+# ── Loaded Dataset ───────────────────────────────────────────────────────────
+with st.expander("📂 View Loaded Dataset (Raw Data)", expanded=True):
+    import pandas as pd
+    try:
+        temp_df = pd.read_csv(st.session_state.csv_path)
+        st.dataframe(temp_df, use_container_width=True)
+    except Exception as e:
+        st.warning(f"Could not load dataframe preview: {e}")
 st.markdown("<hr>", unsafe_allow_html=True)
+st.markdown("#### 📊 Visual Analysis")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TABS
-# ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Stats",
-    "📈 Distributions",
-    "📦 Outliers",
-    "🌡️ Correlations",
-    "🔍 Data Quality",
-])
+# ── Display all generated charts ─────────────────────────────────────────────
+chart_paths = glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png"))
+if chart_paths:
+    for i in range(0, len(chart_paths), 2):
+        row = chart_paths[i:i+2]
+        cols = st.columns(len(row))
+        for col, path in zip(cols, row):
+            col_name = os.path.splitext(os.path.basename(path))[0]
+            with col:
+                st.image(path, use_container_width=True)
+                st.markdown(f'<div style="text-align:center;font-size:0.77rem;'
+                            f'color:rgba(255,255,255,0.4);">{col_name}</div>',
+                            unsafe_allow_html=True)
+else:
+    st.info("No charts were generated by the agent.")
 
-# ── TAB 1: Descriptive Statistics ────────────────────────────────────────────
-with tab1:
-    st.markdown("#### 📊 Descriptive Statistics — All Columns")
-    if stats:
-        # Build an HTML table
-        rows_html = ""
-        for col_name, s in stats.items():
-            missing_pct = s.get("missing_pct", 0)
-            badge_cls = ("badge-red" if missing_pct > 20
-                         else "badge-amber" if missing_pct > 0
-                         else "badge-green")
-            rows_html += f"""<tr>
-                <td><b>{col_name}</b></td>
-                <td>{s.get('count', '—')}</td>
-                <td>{s.get('min', '—')}</td>
-                <td>{s.get('max', '—')}</td>
-                <td>{s.get('mean', '—')}</td>
-                <td>{s.get('median', '—')}</td>
-                <td>{s.get('std', '—')}</td>
-                <td class="{badge_cls}">{missing_pct}%</td>
-            </tr>"""
-
-        st.markdown(f"""
-        <table class="stattbl">
-            <thead><tr>
-                <th>Column</th><th>Count</th><th>Min</th><th>Max</th>
-                <th>Mean</th><th>Median</th><th>Std Dev</th><th>Missing %</th>
-            </tr></thead>
-            <tbody>{rows_html}</tbody>
-        </table>""", unsafe_allow_html=True)
-    else:
-        st.info("Statistics not available.")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    # Bar chart of means
-    bar_path = chart_exists("bar_chart.png")
-    if bar_path:
-        st.markdown("##### Column Means — Bar Chart")
-        st.image(bar_path, use_container_width=True)
-
-
-# ── TAB 2: Distributions ────────────────────────────────────────────────────
-with tab2:
-    st.markdown("#### 📈 Value Distributions — Histograms per Column")
-    st.caption("🟡 Dashed line = Mean &nbsp;|&nbsp; 🟢 Dotted line = Median")
-    hist_paths = charts_by_prefix("hist_")
-    if hist_paths:
-        # Show 2 per row
-        for i in range(0, len(hist_paths), 2):
-            row = hist_paths[i:i+2]
-            cols = st.columns(len(row))
-            for col, path in zip(cols, row):
-                col_name = os.path.splitext(os.path.basename(path))[0].replace("hist_", "")
-                with col:
-                    st.image(path, use_container_width=True)
-                    st.markdown(f'<div style="text-align:center;font-size:0.77rem;'
-                                f'color:rgba(255,255,255,0.4);">{col_name}</div>',
-                                unsafe_allow_html=True)
-    else:
-        st.info("Histograms not generated yet.")
-
-
-# ── TAB 3: Outliers ───────────────────────────────────────────────────────────
-with tab3:
-    st.markdown("#### 📦 Outlier Detection — Box Plots + IQR Analysis")
-
-    # Box plot
-    box_path = chart_exists("boxplot_all.png")
-    if box_path:
-        st.markdown("##### Box Plot — All Columns (🔴 dots = outliers)")
-        st.image(box_path, use_container_width=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-
-    # IQR table
-    if outliers:
-        st.markdown("##### IQR Outlier Report")
-        rows_html = ""
-        for col_name, o in outliers.items():
-            if not isinstance(o, dict) or "outlier_count" not in o:
-                continue
-            cnt = o["outlier_count"]
-            badge_cls = "badge-red" if cnt > 0 else "badge-green"
-            vals = ", ".join(str(v) for v in o.get("outlier_values", [])[:5])
-            if len(o.get("outlier_values", [])) > 5:
-                vals += "…"
-            rows_html += f"""<tr>
-                <td><b>{col_name}</b></td>
-                <td>{o.get('q1','—')}</td>
-                <td>{o.get('q3','—')}</td>
-                <td>{o.get('iqr','—')}</td>
-                <td>{o.get('lower_fence','—')}</td>
-                <td>{o.get('upper_fence','—')}</td>
-                <td class="{badge_cls}">{cnt}</td>
-                <td style="color:#f87171;font-size:0.78rem;">{vals if vals else '—'}</td>
-            </tr>"""
-
-        if rows_html:
-            st.markdown(f"""
-            <table class="otable">
-                <thead><tr>
-                    <th>Column</th><th>Q1</th><th>Q3</th><th>IQR</th>
-                    <th>Lower Fence</th><th>Upper Fence</th><th>Outliers</th><th>Values</th>
-                </tr></thead>
-                <tbody>{rows_html}</tbody>
-            </table>""", unsafe_allow_html=True)
-    else:
-        st.info("Outlier data not available.")
-
-
-# ── TAB 4: Correlations ──────────────────────────────────────────────────────
-with tab4:
-    st.markdown("#### 🌡️ Feature Correlations")
-
-    heatmap_path = chart_exists("heatmap_chart.png")
-    scatter_path = chart_exists("scatter_chart.png")
-
-    if heatmap_path:
-        st.markdown("##### Pearson Correlation Heatmap")
-        st.caption("🔴 Strong positive  ·  🔵 Strong negative  ·  ⚪ No correlation")
-        st.image(heatmap_path, use_container_width=True)
-
-    if scatter_path:
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("##### Scatter Plot — First Two Columns Relationship")
-        st.image(scatter_path, use_container_width=True)
-
-    if not heatmap_path and not scatter_path:
-        st.info("Correlation charts not generated.")
-
-
-# ── TAB 5: Data Quality ──────────────────────────────────────────────────────
-with tab5:
-    st.markdown("#### 🔍 Data Quality Report")
-
-    mv_path = chart_exists("missing_values.png")
-    if mv_path:
-        st.markdown("##### Missing Values per Column")
-        st.caption("🟢 < 5%  ·  🟡 5–20%  ·  🔴 > 20%")
-        st.image(mv_path, use_container_width=True)
-        st.markdown("<br>", unsafe_allow_html=True)
-
-    if missing:
-        st.markdown("##### Missing Value Details")
-        rows_html = ""
-        for col_name, m in missing.items():
-            cnt = m.get("missing_count", 0)
-            pct = m.get("missing_pct", 0)
-            badge_cls = ("badge-red" if pct > 20
-                         else "badge-amber" if pct > 0
-                         else "badge-green")
-            bar_w = min(int(pct), 100)
-            bar = f'<div style="background:#f87171;height:6px;width:{bar_w}%;border-radius:3px;"></div>' \
-                  if pct > 20 else \
-                  f'<div style="background:#fbbf24;height:6px;width:{bar_w}%;border-radius:3px;"></div>' \
-                  if pct > 0 else \
-                  f'<div style="background:#34d399;height:6px;width:4px;border-radius:3px;"></div>'
-            rows_html += f"""<tr>
-                <td><b>{col_name}</b></td>
-                <td class="{badge_cls}">{cnt} cells</td>
-                <td>{bar} <span style="font-size:0.75rem;">{pct}%</span></td>
-            </tr>"""
-
-        st.markdown(f"""
-        <table class="otable">
-            <thead><tr><th>Column</th><th>Missing Count</th><th>Visual</th></tr></thead>
-            <tbody>{rows_html}</tbody>
-        </table>""", unsafe_allow_html=True)

@@ -118,6 +118,102 @@ div[data-testid="stFileUploader"] {
     border-radius: 14px; padding: 0.3rem;
 }
 
+/* MCQ Clarification Card */
+.mcq-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    overflow: hidden;
+    margin-top: 1rem;
+}
+.mcq-card-header {
+    display: flex; align-items: center; gap: 0.75rem;
+    border-bottom: 1px solid rgba(255,255,255,0.07);
+    padding: 1.1rem 1.4rem;
+    background: rgba(255,255,255,0.02);
+}
+.mcq-card-header .mcq-icon {
+    width: 34px; height: 34px; background: rgba(255,255,255,0.07);
+    border-radius: 8px; display: flex; align-items: center; justify-content: center;
+    font-size: 0.95rem;
+}
+.mcq-card-header h3 { margin: 0; font-size: 0.92rem; font-weight: 600; color: white; }
+.mcq-card-header p  { margin: 0; font-size: 0.73rem; color: rgba(255,255,255,0.38); }
+.mcq-q-block {
+    padding: 1.1rem 1.4rem;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.mcq-q-num {
+    display: inline-flex; width: 22px; height: 22px;
+    background: rgba(255,255,255,0.08); border-radius: 50%;
+    align-items: center; justify-content: center;
+    font-size: 0.7rem; font-weight: 700; color: rgba(255,255,255,0.6);
+    margin-right: 0.55rem; flex-shrink: 0;
+}
+.mcq-q-text  { font-size: 0.875rem; font-weight: 600; color: white; }
+.mcq-q-hint  { font-size: 0.75rem; color: rgba(255,255,255,0.38); margin: 0.3rem 0 0.75rem 1.85rem; line-height: 1.5; }
+.mcq-opts    { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-left: 1.85rem; }
+
+/* Pill option buttons */
+.pill-btn {
+    display: inline-flex; align-items: center;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 999px;
+    padding: 0.3rem 0.85rem;
+    font-size: 0.8rem; font-weight: 500;
+    color: rgba(255,255,255,0.75);
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+    user-select: none;
+}
+.pill-btn:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.4);
+    color: white;
+}
+.pill-btn.selected {
+    background: rgba(99,102,241,0.2);
+    border-color: #818cf8;
+    color: #c7d2fe;
+    font-weight: 600;
+}
+
+/* Progress dots */
+.mcq-progress { font-size: 0.8rem; color: rgba(255,255,255,0.38); display: flex; align-items: center; gap: 0.45rem; }
+.mcq-dot { width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; display: inline-block; flex-shrink:0; }
+.mcq-dot.done { background: #34d399; }
+
+/* MCQ pill buttons — override ALL Streamlit button defaults in horizontal blocks */
+div.mcq-q-block ~ div[data-testid="stHorizontalBlock"] button,
+div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
+    background: transparent !important;
+    border: 1px solid rgba(255,255,255,0.22) !important;
+    border-radius: 999px !important;
+    padding: 0.25rem 1rem !important;
+    font-size: 0.8rem !important;
+    font-weight: 500 !important;
+    color: rgba(255,255,255,0.72) !important;
+    height: 32px !important;
+    min-height: 32px !important;
+    line-height: 1 !important;
+    transition: all 0.15s ease !important;
+    white-space: nowrap !important;
+    box-shadow: none !important;
+    margin: 0 !important;
+}
+div[data-testid="stHorizontalBlock"] button[kind="secondary"]:hover {
+    background: rgba(255,255,255,0.07) !important;
+    border-color: rgba(255,255,255,0.45) !important;
+    color: white !important;
+}
+/* Hide the full-width expander on the column wrapper itself */
+div[data-testid="stHorizontalBlock"] [data-testid="column"] {
+    padding: 0 4px !important;
+}
+
+
 /* Tabs */
 button[data-baseweb="tab"] {
     font-size: 0.82rem !important;
@@ -191,6 +287,8 @@ with st.sidebar:
             st.session_state.stats_json  = None
             st.session_state.outlier_json = None
             st.session_state.missing_json = None
+            st.session_state.messages = []
+            st.session_state.awaiting_user = False
 
     if st.session_state.csv_name:
         st.success(f"✅ **{st.session_state.csv_name}** · {st.session_state.csv_size_kb} KB")
@@ -206,10 +304,9 @@ with st.sidebar:
         r = st.session_state.eda_result
         if r and r["success"]:
             n_charts = len(glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png")))
-            st.success("✅ EDA Complete")
+            st.success("✅ EDA Phase")
             st.markdown(f"""
             <div style="font-size:0.79rem;color:rgba(255,255,255,0.5);line-height:2;">
-            🔢 Steps: <b style="color:#818cf8;">{len(r['steps'])}</b><br>
             📊 Charts: <b style="color:#34d399;">{n_charts}</b>
             </div>""", unsafe_allow_html=True)
         else:
@@ -259,84 +356,237 @@ if not st.session_state.csv_name:
             </div>""", unsafe_allow_html=True)
     st.stop()
 
-# ─── Auto-run EDA ────────────────────────────────────────────────────────────
-if not st.session_state.done:
-    with st.spinner("🤖 Agent is running full EDA — generating all charts…"):
+# ─── Phase 1: Read data + ask clarification MCQs ──────────────────────────────
+if not st.session_state.done and not st.session_state.awaiting_user and not st.session_state.get("phase2_ready"):
+    with st.spinner("🤖 Agent is reading the dataset and preparing questions..."):
         try:
-            from agent import run_analysis
-            from tools import load_csv
+            from agent import run_analysis_graph
+            from langchain_core.messages import HumanMessage
 
-            clear_charts()
-            load_csv(st.session_state.csv_path)
-            
-            result = run_analysis(
-                csv_path=st.session_state.csv_path,
-            )
-            st.session_state.eda_result = result
-            st.session_state.done = True
+            if not st.session_state.messages:
+                st.session_state.messages = [HumanMessage(
+                    content=f"Dataset '{st.session_state.csv_name}' has been uploaded. Read the data info and decide if you have any clarification questions before generating charts."
+                )]
+                clear_charts()
 
+            res = run_analysis_graph(st.session_state.csv_path, st.session_state.messages, phase=1)
+            st.session_state.messages = res["messages"]
+            st.session_state.eda_result = res
+
+            last = res["messages"][-1].content.strip()
+            if "READY_TO_ANALYZE" in last:
+                # No questions — go straight to charting
+                st.session_state.phase2_ready = True
+            else:
+                # Agent has questions — show MCQ panel
+                st.session_state.awaiting_user = True
         except Exception as e:
-            st.session_state.eda_result = {
-                "success": False, "answer": str(e),
-                "steps": [], "chart_paths": [], "error": str(e)
-            }
+            import traceback
+            st.session_state.eda_result = {"success": False, "answer": str(e), "error": str(e)}
             st.session_state.done = True
     st.rerun()
 
+# ─── Phase 2: Generate charts after user answered ──────────────────────────────
+if st.session_state.get("phase2_ready") and not st.session_state.done:
+    with st.spinner("📊 Generating best visual patterns based on your preferences..."):
+        try:
+            from agent import run_analysis_graph
+
+            res = run_analysis_graph(st.session_state.csv_path, st.session_state.messages, phase=2)
+            st.session_state.messages = res["messages"]
+            st.session_state.eda_result = res
+            st.session_state.done = True
+            st.session_state.phase2_ready = False
+        except Exception as e:
+            import traceback
+            st.session_state.eda_result = {"success": False, "answer": str(e), "error": str(e)}
+            st.session_state.done = True
+    st.rerun()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# REPORT: Simplified Dashboard
+# REPORT: Simplified Dashboard — only show after analysis is done
 # ─────────────────────────────────────────────────────────────────────────────
-result = st.session_state.eda_result
-if not result:
+
+# If agent is waiting for MCQ answers, skip the dashboard and go straight to MCQ UI
+if st.session_state.awaiting_user:
+    result = st.session_state.eda_result
+    pass  # fall through to HITL section below
+elif not st.session_state.eda_result:
     st.stop()
-
-if not result["success"]:
-    st.error(f"**EDA Error:** {result.get('error', result['answer'])}")
-    st.stop()
-
-# ── Top metric bar ───────────────────────────────────────────────────────────
-n_charts = len(glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png")))
-
-m1, m2 = st.columns(2)
-with m1:
-    st.markdown(f"""
-    <div class="scard">
-        <span class="v" style="color:#818cf8;">{st.session_state.csv_name}</span>
-        <span class="l">Dataset</span>
-    </div>""", unsafe_allow_html=True)
-with m2:
-    st.markdown(f"""
-    <div class="scard">
-        <span class="v" style="color:#34d399;">{n_charts}</span>
-        <span class="l">Charts Generated</span>
-    </div>""", unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# ── Loaded Dataset ───────────────────────────────────────────────────────────
-with st.expander("📂 View Loaded Dataset (Raw Data)", expanded=True):
-    import pandas as pd
-    try:
-        temp_df = pd.read_csv(st.session_state.csv_path)
-        st.dataframe(temp_df, use_container_width=True)
-    except Exception as e:
-        st.warning(f"Could not load dataframe preview: {e}")
-st.markdown("<hr>", unsafe_allow_html=True)
-st.markdown("#### 📊 Visual Analysis")
-
-# ── Display all generated charts ─────────────────────────────────────────────
-chart_paths = glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png"))
-if chart_paths:
-    for i in range(0, len(chart_paths), 2):
-        row = chart_paths[i:i+2]
-        cols = st.columns(len(row))
-        for col, path in zip(cols, row):
-            col_name = os.path.splitext(os.path.basename(path))[0]
-            with col:
-                st.image(path, use_container_width=True)
-                st.markdown(f'<div style="text-align:center;font-size:0.77rem;'
-                            f'color:rgba(255,255,255,0.4);">{col_name}</div>',
-                            unsafe_allow_html=True)
 else:
-    st.info("No charts were generated by the agent.")
+    result = st.session_state.eda_result
+    if not result["success"]:
+        st.error(f"**EDA Error:** {result.get('error', result['answer'])}")
+        st.stop()
 
+if not st.session_state.awaiting_user:
+    # ── Top metric bar ───────────────────────────────────────────────────────────
+    n_charts = len(glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png")))
+
+    m1, m2 = st.columns(2)
+    with m1:
+        st.markdown(f"""
+        <div class="scard">
+            <span class="v" style="color:#818cf8;">{st.session_state.csv_name}</span>
+            <span class="l">Dataset</span>
+        </div>""", unsafe_allow_html=True)
+    with m2:
+        st.markdown(f"""
+        <div class="scard">
+            <span class="v" style="color:#34d399;">{n_charts}</span>
+            <span class="l">Charts Generated</span>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+# ── Loaded Dataset + Charts (only when done and not awaiting MCQ)
+if not st.session_state.awaiting_user:
+    with st.expander("📂 View Loaded Dataset (Raw Data)", expanded=False):
+        import pandas as pd
+        try:
+            temp_df = pd.read_csv(st.session_state.csv_path)
+            st.dataframe(temp_df, use_container_width=True)
+        except Exception as e:
+            st.warning(f"Could not load dataframe preview: {e}")
+
+    if st.session_state.done:
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.markdown("#### 📊 Visual Analysis")
+        chart_paths = glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png"))
+        if chart_paths:
+            for i in range(0, len(chart_paths), 2):
+                row = chart_paths[i:i+2]
+                cols = st.columns(len(row))
+                for col, path in zip(cols, row):
+                    col_name = os.path.splitext(os.path.basename(path))[0]
+                    with col:
+                        st.image(path, use_container_width=True)
+                        st.markdown(f'<div style="text-align:center;font-size:0.77rem;color:rgba(255,255,255,0.4);">{col_name}</div>',
+                                    unsafe_allow_html=True)
+        else:
+            st.info("No charts were generated by the agent yet.")
+
+# ── Hitl / Clarification UI ─────────────────────────────────
+if st.session_state.awaiting_user:
+
+    msg_content = st.session_state.messages[-1].content
+    parsed_mcq = None
+    import json, re
+
+    # Robustly extract JSON block from agent message (handles text before/after JSON)
+    def extract_json(text):
+        # Try finding a JSON block between { } that contains clarification_needed
+        matches = re.findall(r'\{[\s\S]*?\}', text, re.DOTALL)
+        # Try multi-level: find the outermost { ... } block
+        brace_match = re.search(r'(\{[\s\S]+\})', text, re.DOTALL)
+        candidates = [brace_match.group(1)] if brace_match else []
+        candidates += matches
+        for candidate in candidates:
+            try:
+                obj = json.loads(candidate)
+                if "clarification_needed" in obj or "question" in obj:
+                    return obj
+            except:
+                continue
+        return None
+
+    parsed_mcq = extract_json(msg_content)
+
+    questions = None
+    if parsed_mcq and parsed_mcq.get("clarification_needed") and isinstance(parsed_mcq.get("questions"), list):
+        questions = parsed_mcq["questions"]
+    elif parsed_mcq and "question" in parsed_mcq and "options" in parsed_mcq:
+        # backward compat single-question format
+        questions = [{"id": 1, "question": parsed_mcq["question"], "hint": "", "options": parsed_mcq["options"]}]
+
+    if questions:
+        # Track answers per question in session
+        if "mcq_answers" not in st.session_state or len(st.session_state.mcq_answers) != len(questions):
+            st.session_state.mcq_answers = {q["id"]: None for q in questions}
+
+        answered = sum(1 for v in st.session_state.mcq_answers.values() if v is not None)
+        total    = len(questions)
+
+        # ── MCQ card header
+        st.markdown("""
+        <div class="mcq-card">
+          <div class="mcq-card-header">
+            <div class="mcq-icon">🤖</div>
+            <div>
+              <h3>AI Data Scientist — Clarification</h3>
+              <p>Refine the analysis by answering these questions</p>
+            </div>
+          </div>
+        """, unsafe_allow_html=True)
+
+        # ── Render each question
+        for idx, q in enumerate(questions):
+            qid   = q["id"]
+            qtext = q["question"]
+            hint  = q.get("hint", "")
+            opts  = q["options"]
+            cur   = st.session_state.mcq_answers.get(qid)
+
+            # Question header (number + text + hint)
+            st.markdown(f"""
+            <div class="mcq-q-block">
+              <div style="display:flex;align-items:flex-start;">
+                <span class="mcq-q-num">{idx+1}</span>
+                <div>
+                  <div class="mcq-q-text">{qtext}</div>
+                  <div class="mcq-q-hint">{hint}</div>
+                </div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ONE row of compact pill buttons — no use_container_width so they stay small
+            btn_cols = st.columns(len(opts))
+            for bcol, opt in zip(btn_cols, opts):
+                label = ("✅ " if cur == opt else "") + str(opt)
+                if bcol.button(label, key=f"mcq_{qid}_{opt}"):
+                    st.session_state.mcq_answers[qid] = opt
+                    st.rerun()
+
+
+        # ── Footer: progress + submit
+        answered = sum(1 for v in st.session_state.mcq_answers.values() if v is not None)
+        dot_html = " ".join(
+            f'<span class="mcq-dot{" done" if st.session_state.mcq_answers.get(q["id"]) else ""}"></span>'
+            for q in questions
+        )
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    margin-top:0.5rem;padding:0.4rem 0.2rem;">
+          <div class="mcq-progress">{dot_html} <span>{answered} / {total} answered</span></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if answered == total:
+            if st.button("🔍 Start Analysis", use_container_width=True, type="primary"):
+                summary = "User clarification answers: "
+                summary += "; ".join(f'Q{q["id"]}: {st.session_state.mcq_answers[q["id"]]}' for q in questions)
+                from langchain_core.messages import HumanMessage
+                st.session_state.messages.append(HumanMessage(content=summary))
+                st.session_state.awaiting_user = False
+                st.session_state.phase2_ready = True
+                del st.session_state.mcq_answers
+                st.rerun()
+        else:
+            st.button("🔍 Start Analysis", use_container_width=True, disabled=True,
+                      help=f"Answer all {total} questions to proceed.")
+    else:
+        # Fallback: plain text clarification
+        st.info(f"🤖 **Agent:** {msg_content}")
+        reply = st.chat_input("Provide clarification to the agent...")
+        if reply:
+            from langchain_core.messages import HumanMessage
+            st.session_state.messages.append(HumanMessage(content=reply))
+            st.session_state.awaiting_user = False
+            st.rerun()
+
+elif st.session_state.done:
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.success("🤖 **Agent Summary:**")
+    st.markdown(st.session_state.messages[-1].content)

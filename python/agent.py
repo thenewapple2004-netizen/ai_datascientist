@@ -1,105 +1,131 @@
 import os
 import glob
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from langgraph.prebuilt import create_react_agent
+from langchain_core.tools import tool
+from langchain_core.prompts import ChatPromptTemplate
 import tools
 from tools import load_csv
 from llm import get_llm
 
-def run_analysis(csv_path: str) -> dict:
-    """
-    Full pipeline using pure LangChain LCEL (Directed Acyclic Graph):
-      1. Load data
-      2. Get context (dataframe info + correlation matrix)
-      3. Create LangChain prompt expecting JSON
-      4. Call LLM sequentially
-      5. Parse output and generate charts
-    """
-    result = {
-        "success": False,
-        "answer": "",
-        "steps": [],
-        "chart_paths": [],
-    }
 
-    try:
 
-        load_status = load_csv(csv_path)
-        print(f"[Agent] Data load: {load_status}")
-        df = tools._df
+@tool
+def tool_get_dataframe_info(dummy: str = "") -> str:
+    """Returns dataset info: shape, column names, types, missing values. ALWAYS CALL THIS FIRST."""
+    return tools.get_dataframe_info(tools._df)
 
-        df_info = tools.get_dataframe_info(df)
-        corr_matrix = tools.get_correlation_matrix(df)
-        result["steps"].append("Computed Dataframe Info and Correlation Matrix")
+@tool
+def tool_plot_correlation_heatmap(dummy: str = "") -> str:
+    """Generates and saves a correlation heatmap of all numeric columns. Call this to understand feature relationships."""
+    return tools.plot_correlation_heatmap(tools._df)
 
-        template = """
-You are a senior AI Data Scientist. Your objective is to perform a visual EDA on the uploaded dataset.
-Instead of bombarding the user with all possible graphs, YOUR JOB IS TO FIND THE SINGLE BEST, MOST IMPORTANT PATTERN for each category.
+@tool
+def tool_plot_histogram(column_name: str) -> str:
+    """Generates a univariate histogram with KDE for a single continuous column."""
+    return tools.plot_histogram(tools._df, column_name)
 
-DATAFRAME INFO:
-{df_info}
+@tool
+def tool_plot_countplot(column_name: str) -> str:
+    """Generates a univariate countplot for a single categorical column."""
+    return tools.plot_countplot(tools._df, column_name)
 
-CORRELATION MATRIX for NUMERICAL COLUMNS:
-{corr_matrix}
+@tool
+def tool_plot_scatterplot(x_col: str, y_col: str) -> str:
+    """Generates a bivariate scatterplot comparing two continuous columns."""
+    return tools.plot_scatterplot(tools._df, x_col, y_col)
 
-Pick EXACTLY ONE graph for each category that reveals the most important story in this dataset.
-Provide your plan strictly in the following JSON format:
+@tool
+def tool_plot_boxplot(x_col: str, y_col: str) -> str:
+    """Generates a multivariate boxplot: x_col = categorical grouping column, y_col = numeric column to compare."""
+    return tools.plot_boxplot(tools._df, x_col, y_col)
+
+EDA_TOOLS = [
+    tool_get_dataframe_info,
+    tool_plot_correlation_heatmap,
+    tool_plot_histogram,
+    tool_plot_countplot,
+    tool_plot_scatterplot,
+    tool_plot_boxplot,
+]
+
+
+
+PHASE1_PROMPT = """\
+You are an expert AI Data Scientist. A CSV dataset has just been uploaded.
+
+PHASE 1 — YOUR ONLY JOB RIGHT NOW:
+1. Call `tool_get_dataframe_info` to understand the dataset.
+2. Based on what you learn (columns, types, data), identify any ambiguities you have.
+3. If you have ANY questions you need from the user before deciding what to visualize — ask them ALL NOW in one response.
+4. If you are fully confident and have no questions, say exactly: "READY_TO_ANALYZE"
+
+CRITICAL RULES:
+- DO NOT call any chart tools yet. Charts come in Phase 2.
+- DO NOT generate any charts now.
+- If you have clarification questions, return them in this EXACT JSON format (nothing else outside it):
 {{
-  "best_univariate_chart": {{"type": "histogram", "column": "col_name"}},
-  "best_bivariate_chart": {{"type": "scatterplot", "x": "col1", "y": "col2"}},
-  "best_multivariate_chart": {{"type": "boxplot", "x": "cat_col", "y": "num_col"}},
-  "summary": "3 brief bullet points about why you chose these specific relationships."
+  "clarification_needed": true,
+  "questions": [
+    {{
+      "id": 1,
+      "question": "Which column should be the primary focus of the analysis?",
+      "hint": "This helps the AI choose the most relevant comparisons.",
+      "options": ["Column_A", "Column_B", "Column_C", "No preference"]
+    }},
+    {{
+      "id": 2,
+      "question": "What type of patterns interest you most?",
+      "hint": "Guides which chart types will be prioritized.",
+      "options": ["Distributions", "Relationships between columns", "Category comparisons", "Show everything important"]
+    }}
+  ]
 }}
-NOTE: For categorical variables, use type "countplot". For continuous, use "histogram".
+- Include 1–3 questions, each with 3–5 options.
+- If you are fully confident and need NO clarification: output exactly the text: READY_TO_ANALYZE
 """
-        prompt = PromptTemplate(
-            template=template,
-            input_variables=["df_info", "corr_matrix"]
-        )
-
-        llm = get_llm()
-        llm_json = llm.bind(response_format={"type": "json_object"})
-        parser = JsonOutputParser()
-
-        chain = prompt | llm_json | parser
-
-        print("\n[Agent] Running sequential LCEL chain for top 3 charts...")
-        output = chain.invoke({"df_info": df_info, "corr_matrix": corr_matrix})
-
-        result["steps"].append("LLM decided on the 3 best analysis charts")
-
-        tools.plot_correlation_heatmap(df)
-        result["steps"].append("Plotted correlation heatmap")
-
-        uni = output.get("best_univariate_chart", {})
-        if uni and uni.get("column") in df.columns:
-            if uni.get("type") == "countplot":
-                tools.plot_countplot(df, uni["column"])
-            else:
-                tools.plot_histogram(df, uni["column"])
-
-        bi = output.get("best_bivariate_chart", {})
-        if bi and bi.get("x") in df.columns and bi.get("y") in df.columns:
-            tools.plot_scatterplot(df, bi["x"], bi["y"])
-
-        multi = output.get("best_multivariate_chart", {})
-        if multi and multi.get("x") in df.columns and multi.get("y") in df.columns:
-            tools.plot_boxplot(df, multi["x"], multi["y"])
-        
-        result["steps"].append("Plotted exclusively the top Univariate, Bivariate, and Multivariate patterns")
 
 
+PHASE2_PROMPT = """\
+You are an expert AI Data Scientist. You have already read the dataset info and received the user's preferences.
 
-        result["answer"] = output.get("summary", "Done running charts.")
-        result["success"] = True
+PHASE 2 — GENERATE THE BEST VISUAL EDA:
+Based on the dataset features and the user's answers, now generate EXACTLY these charts:
+1. `tool_plot_correlation_heatmap` — always run this first to see feature relationships
+2. ONE best univariate chart: use `tool_plot_histogram` for continuous columns OR `tool_plot_countplot` for categorical
+3. ONE best bivariate chart: use `tool_plot_scatterplot` for two continuous columns that show the strongest pattern
+4. ONE best multivariate chart: use `tool_plot_boxplot` comparing the best categorical vs numeric column pair
 
-        charts_dir = os.path.join(os.path.dirname(__file__), "charts")
-        if os.path.isdir(charts_dir):
-            result["chart_paths"] = sorted(glob.glob(os.path.join(charts_dir, "*.png")))
+STRICT RULES:
+- Choose the MOST INSIGHTFUL columns based on the data info and user preferences.
+- Do NOT generate redundant or obvious charts.
+- After generating all 4 charts, write a concise 3-bullet-point summary of what was found.
+- That final summary is your LAST output. Do not say anything after it.
+"""
 
-    except Exception as e:
-        import traceback
-        result["answer"] = f"Runtime Error: {str(e)}\n\n{traceback.format_exc()}"
-        result["success"] = False
+def create_agent(phase: int = 2):
+    prompt = PHASE1_PROMPT if phase == 1 else PHASE2_PROMPT
+    return create_react_agent(get_llm(), tools=EDA_TOOLS, prompt=prompt)
 
-    return result
+def run_analysis_graph(csv_path: str, messages: list, phase: int = 1) -> dict:
+    """
+    Runs LangGraph agent.
+    phase=1 → reads data, may ask MCQ clarification questions
+    phase=2 → generates all charts using user answers as context
+    """
+    load_csv(csv_path)
+    agent = create_agent(phase=phase)
+    result = agent.invoke({"messages": messages})
+
+    charts_dir = os.path.join(os.path.dirname(__file__), "charts")
+    paths = []
+    if os.path.isdir(charts_dir):
+        paths = sorted(glob.glob(os.path.join(charts_dir, "*.png")))
+
+    last_msg = result["messages"][-1].content
+
+    return {
+        "messages": result["messages"],
+        "chart_paths": paths,
+        "success": True,
+        "answer": last_msg,
+    }

@@ -9,7 +9,6 @@ import glob
 import tempfile
 import json
 
-import pandas as pd
 import streamlit as st
 
 st.set_page_config(
@@ -268,7 +267,6 @@ for k, v in [
     ("messages",        []),
     ("preview_done",    False),
     ("dropped_cols",    []),
-    ("original_df",     None),   # snapshot of raw data before any FE
     # Phase tracking
     ("eda_done",        False),
     ("fe_ready",        False),
@@ -342,7 +340,6 @@ with st.sidebar:
             st.session_state.phase2_ready   = False
             st.session_state.preview_done   = False
             st.session_state.dropped_cols   = []
-            st.session_state.original_df    = None
             st.session_state.messages       = []
             st.session_state.eda_done       = False
             st.session_state.fe_ready       = False
@@ -427,6 +424,7 @@ if not st.session_state.csv_name:
 
 # ─── Dataset Preview & Column Cleanup ────────────────────────────────────────
 if not st.session_state.preview_done and st.session_state.csv_path:
+    import pandas as pd
     try:
         _pf = pd.read_csv(st.session_state.csv_path)
     except Exception as _e:
@@ -455,28 +453,38 @@ if not st.session_state.preview_done and st.session_state.csv_path:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Column health summary — read-only, the AI agent will handle drops
-    st.markdown('<div class="dp-card-hdr">🔬 Column Overview — AI will auto-clean during Feature Engineering</div>', unsafe_allow_html=True)
+    # Column intelligence
+    st.markdown(
+        '<div class="dp-card-hdr">🔬 Column Intelligence — '
+        'Red = recommended to drop, Yellow = high missing, Green = healthy</div>',
+        unsafe_allow_html=True
+    )
+
+    _suggested = []
     _badge_html = ""
     for _col in _pf.columns:
         _miss  = _pf[_col].isnull().mean()
         _nuniq = _pf[_col].nunique()
         if _nuniq == _nr:
             _b, _r = "drop", "ID/index"
+            _suggested.append(_col)
         elif _nuniq <= 1:
             _b, _r = "drop", "zero variance"
+            _suggested.append(_col)
         elif _miss >= 0.5:
             _b, _r = "warn", f"{_miss*100:.0f}% missing"
         else:
             _b, _r = "safe", ""
         _note = f'<span class="dr">({_r})</span>' if _r else ""
         _badge_html += f'<span class="col-badge {_b}">{_col}{_note}</span>'
+
     st.markdown(f'<div style="padding:0.4rem 0 0.8rem;">{_badge_html}</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div style="font-size:0.78rem;color:rgba(255,255,255,0.38);margin-bottom:0.8rem;">'
-        '🤖 Red columns (ID/zero-variance) will be automatically dropped by the AI. '
-        'If the AI needs your input on any ambiguous column, it will ask you a clarification question.</div>',
-        unsafe_allow_html=True
+
+    # Multiselect to choose which columns to drop
+    st.markdown("**Select columns to remove before analysis:**")
+    cols_to_drop = st.multiselect(
+        label="", options=list(_pf.columns), default=_suggested,
+        placeholder="Choose columns to drop...", label_visibility="collapsed",
     )
 
     # Dataset preview
@@ -484,10 +492,11 @@ if not st.session_state.preview_done and st.session_state.csv_path:
         st.dataframe(_pf.head(50), use_container_width=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🚀 Start Analysis", type="primary", use_container_width=True):
-        # Snapshot the raw dataframe before AI modifies it (used by Tab 1 "Original Dataset")
-        st.session_state.original_df  = _pf
-        st.session_state.dropped_cols = []
+    if st.button("🚀 Apply & Start Analysis", type="primary", use_container_width=True):
+        if cols_to_drop:
+            _pf = _pf.drop(columns=cols_to_drop, errors="ignore")
+            _pf.to_csv(st.session_state.csv_path, index=False)
+        st.session_state.dropped_cols = cols_to_drop
         st.session_state.preview_done = True
         st.session_state.messages     = []
         clear_charts()
@@ -588,11 +597,8 @@ def render_mcq_card(title: str, subtitle: str, mcq_key: str, submit_label: str):
 # PIPELINE EXECUTION & TAB DISPLAY
 # ═══════════════════════════════════════════════════════════════════════════════
 if st.session_state.get("preview_done"):
-    _tabs = st.tabs([
-        "📊 Initial EDA",
-        "🔧 Feature Engineering",
-        "📈 Final Analysis"
-    ])
+    _tab_labels = ["📊 Initial EDA", "🔧 Feature Engineering", "📈 Final Analysis"]
+    _tabs = st.tabs(_tab_labels)
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB 1 — Initial EDA & Clarification
@@ -682,25 +688,21 @@ if st.session_state.get("preview_done"):
             st.rerun()
 
         elif st.session_state.get("eda_done"):
+            import pandas as pd
             eda_res = st.session_state.get("eda_result_initial") or st.session_state.eda_result
             if not eda_res or not eda_res.get("success"):
                 st.error(f"EDA Error: {eda_res.get('error','') if eda_res else 'No result'}")
             else:
-                with st.expander("📂 Original Dataset (before Feature Engineering)", expanded=False):
+                with st.expander("📂 Original Dataset", expanded=False):
                     try:
-                        _orig = (
-                            st.session_state.original_df
-                            if st.session_state.get("original_df") is not None
-                            else pd.read_csv(st.session_state.csv_path)
-                        )
-                        st.dataframe(_orig, use_container_width=True)
+                        st.dataframe(pd.read_csv(st.session_state.csv_path), use_container_width=True)
                     except Exception:
                         pass
+                import glob, os
                 eda_charts = sorted([
                     p for p in glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png"))
-                    if "cleaned" not in os.path.basename(p) and "_final" not in os.path.basename(p)
+                    if "cleaned" not in os.path.basename(p)
                 ])
-
                 if eda_charts:
                     for i in range(0, len(eda_charts), 2):
                         row = eda_charts[i:i+2]
@@ -717,7 +719,7 @@ if st.session_state.get("preview_done"):
                     st.info("No EDA charts generated yet.")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # TAB 2 — Feature Engineering
+    # TAB 2 — Feature Engineering & Extraction
     # ─────────────────────────────────────────────────────────────────────────
     with _tabs[1]:
         if not st.session_state.get("eda_done"):
@@ -745,8 +747,6 @@ if st.session_state.get("preview_done"):
                         st.session_state.fe_ready    = False
                         st.session_state.final_ready = True
                         st.session_state.fe_report   = last_fe
-                        # Force load into session state to prevent Streamlit from drawing older disk fragments
-                        st.session_state.cleaned_df  = pd.read_csv(st.session_state.csv_path)
                 except Exception as _fe_err:
                     st.session_state.fe_result = {"success": False, "answer": str(_fe_err), "error": str(_fe_err)}
                     st.session_state.fe_done   = True
@@ -773,313 +773,124 @@ if st.session_state.get("preview_done"):
                 st.rerun()
 
         elif st.session_state.get("fe_done"):
-            # ─── helpers ──────────────────────────────────────────────────────
-            fe_report   = st.session_state.get("fe_report", "")
-            original_df = st.session_state.get("original_df")
-            cleaned_df  = (
-                st.session_state.cleaned_df
-                if "cleaned_df" in st.session_state
-                else None
-            )
-
-            # Parse operation lines from the FE report text
+            import pandas as pd
+            fe_report = st.session_state.get("fe_report", "")
             fe_ops_lines = []
             if fe_report:
-                in_binarize_table = False
+                in_table = False
                 for raw in fe_report.split("\n"):
                     line = raw.strip()
-                    if not line or line.startswith("{"):
+                    if not line or line.startswith("FE_COMPLETE:") or line.startswith("{"):
                         continue
                     if "Feature Extraction (Binarization) Complete" in line:
-                        in_binarize_table = True
+                        in_table = True
                         continue
-                    if in_binarize_table:
+                    if in_table:
                         if line.startswith("-") or line.startswith("Original") or line.startswith("New shape"):
                             continue
-                        else:
-                            in_binarize_table = False
-                    cl = line.lstrip("-•*·▸▹ ").strip()
-                    ll = cl.lower()
-                    if any(kw in ll for kw in [
-                        "drop", "encode", "missing", "fill", "binariz", "scale", "impute", "scaled", "encoded"
-                    ]):
-                        if cl and cl not in fe_ops_lines:
-                            fe_ops_lines.append(cl)
-
-            # ════════════════════════════════════════════════════════
-            # SECTION 1 — PRE-FE DATASET ANALYSIS
-            # ════════════════════════════════════════════════════════
-            st.markdown("""
-            <div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);
-                        border-radius:14px;padding:1rem 1.3rem;margin-bottom:1rem;">
-              <div style="font-size:0.72rem;letter-spacing:.1em;text-transform:uppercase;
-                          color:rgba(255,255,255,0.35);margin-bottom:0.4rem;">Section 1</div>
-              <div style="font-size:1rem;font-weight:700;color:#818cf8;">📋 Pre-FE Dataset Analysis</div>
-            </div>""", unsafe_allow_html=True)
-
-            if original_df is not None:
-                _or, _oc = original_df.shape
-                _onum = int(original_df.select_dtypes(include='number').shape[1])
-                _ocat = int(original_df.select_dtypes(exclude='number').shape[1])
-                _omiss_cols = int((original_df.isnull().sum() > 0).sum())
-
-                _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
-                for _cw, _v, _l, _cl in [
-                    (_sc1, f"{_or:,}",  "Rows",            "#818cf8"),
-                    (_sc2, f"{_oc}",    "Columns",         "#34d399"),
-                    (_sc3, f"{_onum}",  "Numeric",         "#60a5fa"),
-                    (_sc4, f"{_ocat}",  "Categorical",     "#f472b6"),
-                    (_sc5, f"{_omiss_cols}", "With Missing","#fbbf24"),
-                ]:
-                    _cw.markdown(
-                        '<div class="dp-stat">'
-                        f'<span class="val" style="color:{_cl};font-size:1.3rem;">{_v}</span>'
-                        f'<span class="lbl">{_l}</span></div>',
-                        unsafe_allow_html=True
-                    )
-
-                st.markdown("<br>", unsafe_allow_html=True)
-
-                # Missing values table
-                miss_rows = []
-                for _col in original_df.columns:
-                    _mc  = int(original_df[_col].isnull().sum())
-                    _mp  = round(original_df[_col].isnull().mean() * 100, 1)
-                    _dt  = str(original_df[_col].dtype)
-                    _uq  = int(original_df[_col].nunique())
-                    miss_rows.append((_col, _mc, _mp, _dt, _uq))
-
-                miss_any = [r for r in miss_rows if r[1] > 0]
-                st.markdown('<div class="dp-card-hdr">❓ Missing Values — Original Dataset</div>', unsafe_allow_html=True)
-                if miss_any:
-                    rows_html = ""
-                    for col, cnt, pct, dtype, uq in miss_any:
-                        sev_color = "#f87171" if pct > 60 else "#fbbf24" if pct > 20 else "#34d399"
-                        bar_w = min(pct, 100)
-                        bar_html = (
-                            f'<div style="display:flex;align-items:center;gap:0.4rem;">'
-                            f'<div style="width:80px;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;">'
-                            f'<div style="width:{bar_w}%;height:6px;background:{sev_color};border-radius:3px;"></div></div>'
-                            f'<span style="color:{sev_color};font-size:0.8rem;">{pct}%</span></div>'
-                        )
-                        rows_html += (
-                            f'<tr>'
-                            f'<td><code style="color:#818cf8;">{col}</code></td>'
-                            f'<td style="color:rgba(255,255,255,0.6);">{dtype}</td>'
-                            f'<td style="color:rgba(255,255,255,0.6);">{uq:,}</td>'
-                            f'<td style="color:{sev_color};">{cnt:,}</td>'
-                            f'<td>{bar_html}</td>'
-                            f'</tr>'
-                        )
-                    st.markdown(
-                        f'''<table class="otable" style="width:100%;margin-bottom:1rem;">
-                          <thead><tr>
-                            <th>Column</th><th>Type</th><th>Unique</th>
-                            <th style="color:#f87171;">Missing Count</th>
-                            <th>Missing %</th>
-                          </tr></thead>
-                          <tbody>{rows_html}</tbody>
-                        </table>''',
-                        unsafe_allow_html=True
-                    )
-                else:
-                    st.markdown(
-                        '<div class="insight" style="border-left-color:#34d399;">'
-                        '✅ No missing values found in the original dataset.</div>',
-                        unsafe_allow_html=True
-                    )
-
-                # Full column summary table
-                st.markdown('<div class="dp-card-hdr">📊 Column Summary — Original Data</div>', unsafe_allow_html=True)
-                rows_html2 = ""
-                for col, cnt, pct, dtype, uq in miss_rows:
-                    if "int" in dtype or "float" in dtype:
-                        type_badge = f'<span style="color:#60a5fa;font-size:0.75rem;">numeric</span>'
-                    elif dtype == "object":
-                        type_badge = f'<span style="color:#f472b6;font-size:0.75rem;">categorical</span>'
                     else:
-                        type_badge = f'<span style="color:#94a3b8;font-size:0.75rem;">{dtype}</span>'
-                    miss_cell = f'<span style="color:#f87171;">{cnt}</span>' if cnt > 0 else f'<span style="color:#34d399;">0</span>'
-                    rows_html2 += (
-                        f'<tr>'
-                        f'<td><code style="color:#a78bfa;">{col}</code></td>'
-                        f'<td>{type_badge}</td>'
-                        f'<td style="color:rgba(255,255,255,0.6);">{uq:,}</td>'
-                        f'<td>{miss_cell}</td>'
-                        f'<td style="color:rgba(255,255,255,0.5);">{pct}%</td>'
-                        f'</tr>'
+                        if not line.startswith("-"):
+                            fe_ops_lines.append(line)
+
+            st.markdown('<div class="dp-card-hdr">⚙️ Feature Engineering Operations</div>', unsafe_allow_html=True)
+            if fe_ops_lines:
+                def _badge(text):
+                    text_l = text.lower()
+                    if "dropped" in text_l:
+                        color, bg, icon = "#f87171", "rgba(248,113,113,0.1)", "🗑️"
+                    elif "encoded" in text_l or "binary" in text_l:
+                        color, bg, icon = "#60a5fa", "rgba(96,165,250,0.1)", "🔄"
+                    elif "missing" in text_l or "filled" in text_l or "handled" in text_l:
+                        color, bg, icon = "#fbbf24", "rgba(251,191,36,0.1)", "🩹"
+                    elif "binarized" in text_l:
+                        color, bg, icon = "#34d399", "rgba(52,211,153,0.1)", "⚡"
+                    else:
+                        color, bg, icon = "rgba(255,255,255,0.6)", "rgba(255,255,255,0.04)", "•"
+                    return (
+                        f'<div style="display:flex;align-items:flex-start;gap:0.5rem;' +
+                        f'padding:0.5rem 0.8rem;margin:0.25rem 0;' +
+                        f'background:{bg};border-radius:8px;border-left:3px solid {color};">' +
+                        f'<span style="font-size:0.9rem;">{icon}</span>' +
+                        f'<span style="font-size:0.82rem;color:rgba(255,255,255,0.8);">{text}</span></div>'
+                    )
+                ops_html = "".join(_badge(l) for l in fe_ops_lines if l)
+                st.markdown(f'<div style="margin-bottom:1rem;">{ops_html}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="insight">No additional cleaning operations were needed.</div>', unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="dp-card-hdr">⚡ Feature Extraction — Numeric → Binary Indicators</div>', unsafe_allow_html=True)
+            try:
+                cleaned_df = pd.read_csv(st.session_state.csv_path)
+                bin_cols = [(c.replace("_bin", ""), c) for c in cleaned_df.columns if c.endswith("_bin")]
+            except Exception:
+                cleaned_df = None
+                bin_cols = []
+
+            if bin_cols and cleaned_df is not None:
+                rows_html = ""
+                for orig, binc in bin_cols:
+                    if orig in cleaned_df.columns:
+                        ones  = int(cleaned_df[binc].sum())
+                        zeros = int(len(cleaned_df) - ones)
+                        pct   = round(ones / len(cleaned_df) * 100, 1) if len(cleaned_df) > 0 else 0
+                        o_min  = round(cleaned_df[orig].min(), 2)
+                        o_max  = round(cleaned_df[orig].max(), 2)
+                        o_mean = round(cleaned_df[orig].mean(), 2)
+                    else:
+                        zeros = ones = pct = o_min = o_max = o_mean = "—"
+                    pct_bar = ""
+                    if isinstance(pct, (int, float)):
+                        pct_bar = (
+                            f'<div style="display:flex;align-items:center;gap:0.4rem;">' +
+                            f'<div style="flex:1;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;">' +
+                            f'<div style="width:{pct}%;height:6px;background:#34d399;border-radius:3px;"></div></div>' +
+                            f'<span style="font-size:0.75rem;color:#34d399;">{pct}%</span></div>'
+                        )
+                    rows_html += (
+                        f"<tr>"
+                        f'<td><code style="color:#818cf8;">{orig}</code></td>' +
+                        f'<td><code style="color:#34d399;">{binc}</code></td>' +
+                        f'<td style="color:rgba(255,255,255,0.5);">{o_min}</td>' +
+                        f'<td style="color:rgba(255,255,255,0.5);">{o_max}</td>' +
+                        f'<td style="color:rgba(255,255,255,0.5);">{o_mean}</td>' +
+                        f'<td style="color:#f87171;">{zeros}</td>' +
+                        f'<td style="color:#34d399;">{ones}</td>' +
+                        f"<td>{pct_bar}</td>"
+                        f"</tr>"
                     )
                 st.markdown(
-                    f'''<table class="otable" style="width:100%;margin-bottom:1.5rem;">
+                    f'''<table class="otable" style="width:100%;">
                       <thead><tr>
-                        <th>Column</th><th>Type</th><th>Unique Values</th>
-                        <th>Missing</th><th>Missing %</th>
+                        <th>Original Column</th><th>Binary Column</th>
+                        <th>Min</th><th>Max</th><th>Mean</th>
+                        <th style="color:#f87171;">Zeros (0)</th>
+                        <th style="color:#34d399;">Ones (1)</th>
+                        <th>% Positive</th>
                       </tr></thead>
-                      <tbody>{rows_html2}</tbody>
+                      <tbody>{rows_html}</tbody>
                     </table>''',
                     unsafe_allow_html=True
                 )
+            else:
+                st.info("No binary (*_bin) columns found. The agent may not have executed binarization.")
 
-            # ════════════════════════════════════════════════════════
-            # SECTION 2 — FE OPERATIONS LOG
-            # ════════════════════════════════════════════════════════
-            st.markdown("""
-            <div style="background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.2);
-                        border-radius:14px;padding:1rem 1.3rem;margin-bottom:1rem;">
-              <div style="font-size:0.72rem;letter-spacing:.1em;text-transform:uppercase;
-                          color:rgba(255,255,255,0.35);margin-bottom:0.4rem;">Section 2</div>
-              <div style="font-size:1rem;font-weight:700;color:#34d399;">⚙️ Feature Engineering Operations Log</div>
-            </div>""", unsafe_allow_html=True)
-
-            # Category buckets for a structured display
-            _op_drop, _op_impute, _op_bin, _op_encode, _op_scale = [], [], [], [], []
-            for op in fe_ops_lines:
-                ol = op.lower()
-                if   "drop" in ol:    _op_drop.append(op)
-                elif "impute" in ol or "fill" in ol or "missing" in ol: _op_impute.append(op)
-                elif "binariz" in ol: _op_bin.append(op)
-                elif "encod"  in ol:  _op_encode.append(op)
-                elif "scale"  in ol:  _op_scale.append(op)
-                else:                 _op_scale.append(op)   # catch-all
-
-            def _render_op_section(icon, title, ops, color, bg):
-                if not ops:
-                    return
-                items = "".join(
-                    f'<li style="margin-bottom:0.3rem;color:rgba(255,255,255,0.8);">{o}</li>'
-                    for o in ops
-                )
-                st.markdown(
-                    f'<div style="border-left:3px solid {color};background:{bg};'
-                    f'border-radius:0 10px 10px 0;padding:0.8rem 1.1rem;margin-bottom:0.6rem;">'
-                    f'<div style="font-weight:600;color:{color};font-size:0.85rem;margin-bottom:0.4rem;">'
-                    f'{icon} {title}</div>'
-                    f'<ul style="margin:0;padding-left:1.2rem;font-size:0.82rem;">{items}</ul></div>',
-                    unsafe_allow_html=True
-                )
-
-            _render_op_section("🗑️", "Dropped Columns",            _op_drop,   "#f87171", "rgba(248,113,113,0.07)")
-            _render_op_section("🩹", "Missing Value Imputation",   _op_impute, "#fbbf24", "rgba(251,191,36,0.07)")
-            _render_op_section("⚡", "Feature Binarization",       _op_bin,    "#34d399", "rgba(52,211,153,0.07)")
-            _render_op_section("🔄", "Categorical Encoding",       _op_encode, "#60a5fa", "rgba(96,165,250,0.07)")
-            _render_op_section("📏", "Feature Scaling (StandardScaler)", _op_scale, "#a78bfa", "rgba(167,139,250,0.07)")
-
-            if not fe_ops_lines:
-                st.markdown(
-                    '<div class="insight">ℹ️ No additional cleaning operations were needed — '
-                    'the dataset was already clean.</div>',
-                    unsafe_allow_html=True
-                )
-
-            # ════════════════════════════════════════════════════════
-            # SECTION 3 — POST-FE DATASET SUMMARY & COMPARISON
-            # ════════════════════════════════════════════════════════
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("""
-            <div style="background:rgba(167,139,250,0.08);border:1px solid rgba(167,139,250,0.2);
-                        border-radius:14px;padding:1rem 1.3rem;margin-bottom:1rem;">
-              <div style="font-size:0.72rem;letter-spacing:.1em;text-transform:uppercase;
-                          color:rgba(255,255,255,0.35);margin-bottom:0.4rem;">Section 3</div>
-              <div style="font-size:1rem;font-weight:700;color:#a78bfa;">✅ Post-FE Dataset Summary</div>
-            </div>""", unsafe_allow_html=True)
-
+            st.markdown('<div class="dp-card-hdr">📂 Cleaned & Extracted Dataset</div>', unsafe_allow_html=True)
             if cleaned_df is not None:
-                _cr, _cc = cleaned_df.shape
-                _cnum = int(cleaned_df.select_dtypes(include='number').shape[1])
-                _ccat = int(cleaned_df.select_dtypes(exclude='number').shape[1])
-                _cmiss = int(cleaned_df.isnull().sum().sum())
-                _bin_count = len([c for c in cleaned_df.columns if c.endswith("_bin")])
+                _nr2, _nc2 = cleaned_df.shape
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Rows",            f"{_nr2:,}")
+                m2.metric("Total Columns",   f"{_nc2}")
+                m3.metric("Binary Features", f"{len(bin_cols)}")
+                with st.expander("View full cleaned dataset", expanded=False):
+                    st.dataframe(cleaned_df, use_container_width=True)
 
-                # Before vs After comparison
-                if original_df is not None:
-                    _or2, _oc2 = original_df.shape
-                    def _diff_badge(before, after, good_direction="less"):
-                        diff = after - before
-                        if diff == 0:
-                            return f'<span style="color:#94a3b8;">→ {after}</span>'
-                        better = diff < 0 if good_direction == "less" else diff > 0
-                        c = "#34d399" if better else "#f87171"
-                        arrow = "↓" if diff < 0 else "↑"
-                        return f'<span style="color:{c};">{before} {arrow} {after}</span>'
-
-                    st.markdown(
-                        f'''<table class="otable" style="width:100%;margin-bottom:1rem;">
-                          <thead><tr>
-                            <th>Metric</th><th>Before FE</th><th>After FE</th><th>Change</th>
-                          </tr></thead>
-                          <tbody>
-                            <tr><td>Rows</td>
-                                <td style="color:rgba(255,255,255,0.6);">{_or2:,}</td>
-                                <td style="color:rgba(255,255,255,0.6);">{_cr:,}</td>
-                                <td>{_diff_badge(_or2, _cr, "same")}</td></tr>
-                            <tr><td>Columns</td>
-                                <td style="color:rgba(255,255,255,0.6);">{_oc2}</td>
-                                <td style="color:rgba(255,255,255,0.6);">{_cc}</td>
-                                <td>{_diff_badge(_oc2, _cc, "same")}</td></tr>
-                            <tr><td>Missing Values (total cells)</td>
-                                <td style="color:#f87171;">{int(original_df.isnull().sum().sum()):,}</td>
-                                <td style="color:#34d399;">{_cmiss:,}</td>
-                                <td>{_diff_badge(int(original_df.isnull().sum().sum()), _cmiss, "less")}</td></tr>
-                            <tr><td>Categorical Columns</td>
-                                <td style="color:rgba(255,255,255,0.6);">{int(original_df.select_dtypes(exclude='number').shape[1])}</td>
-                                <td style="color:#34d399;">{_ccat}</td>
-                                <td>{_diff_badge(int(original_df.select_dtypes(exclude='number').shape[1]), _ccat, "less")}</td></tr>
-                            <tr><td>Numeric Columns</td>
-                                <td style="color:rgba(255,255,255,0.6);">{int(original_df.select_dtypes(include='number').shape[1])}</td>
-                                <td style="color:#34d399;">{_cnum}</td>
-                                <td>{_diff_badge(int(original_df.select_dtypes(include='number').shape[1]), _cnum, "more")}</td></tr>
-                            <tr><td>New Binary (_bin) Features</td>
-                                <td style="color:rgba(255,255,255,0.6);">0</td>
-                                <td style="color:#34d399;">{_bin_count}</td>
-                                <td><span style="color:#34d399;">+{_bin_count}</span></td></tr>
-                          </tbody>
-                        </table>''',
-                        unsafe_allow_html=True
-                    )
-
-                # Cleaned data stats
-                _sc1, _sc2, _sc3, _sc4 = st.columns(4)
-                for _cw, _v, _l, _cl in [
-                    (_sc1, f"{_cr:,}", "Rows",             "#818cf8"),
-                    (_sc2, f"{_cc}",   "Columns",          "#34d399"),
-                    (_sc3, f"{_cnum}", "Numeric Cols",     "#60a5fa"),
-                    (_sc4, f"{_cmiss}","Missing Cells",    "#34d399" if _cmiss == 0 else "#fbbf24"),
-                ]:
-                    _cw.markdown(
-                        '<div class="dp-stat">'
-                        f'<span class="val" style="color:{_cl};font-size:1.3rem;">{_v}</span>'
-                        f'<span class="lbl">{_l}</span></div>',
-                        unsafe_allow_html=True
-                    )
-
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown('<div class="dp-card-hdr">🔍 Cleaned Dataset Preview (first 10 rows)</div>', unsafe_allow_html=True)
-                st.dataframe(cleaned_df.head(10), use_container_width=True)
-                st.markdown(
-                    f'<div style="text-align:right;font-size:0.8rem;color:#888;">'
-                    f'Shape: {_cr:,} rows × {_cc} cols — all numeric, no missing values</div>',
-                    unsafe_allow_html=True
-                )
-                st.markdown("<br>", unsafe_allow_html=True)
-                try:
-                    _csv_bytes_fe = cleaned_df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        label="📥 Download Cleaned Dataset (CSV)",
-                        data=_csv_bytes_fe,
-                        file_name="cleaned_dataset.csv",
-                        mime="text/csv",
-                        key="download_cleaned_fe",
-                        use_container_width=True,
-                    )
-                except Exception as _dl_err:
-                    st.error(f"Download error: {_dl_err}")
-
-            # ── Cleaned correlation heatmap ─────────────────────────────────
-            fe_heatmap_path = os.path.join(os.path.dirname(__file__), "charts", "heatmap_correlation_cleaned.png")
-            if os.path.exists(fe_heatmap_path):
-                st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown('<div class="dp-card-hdr">🌡️ Cleaned Data — Correlation Heatmap</div>', unsafe_allow_html=True)
-                st.image(fe_heatmap_path, use_container_width=True)
+            import glob, os
+            fe_heatmap = os.path.join(os.path.dirname(__file__), "charts", "heatmap_correlation_cleaned.png")
+            if os.path.exists(fe_heatmap):
+                st.markdown("#### 🌡️ Post-Feature Engineering Correlation Heatmap")
+                st.image(fe_heatmap, use_container_width=True)
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB 3 — Final Analysis
@@ -1108,43 +919,21 @@ if st.session_state.get("preview_done"):
             if not final_res or not final_res.get("success"):
                 st.error(f"Error: {final_res.get('error', 'Unknown') if final_res else 'No result'}")
             else:
-                # ── Load cleaned dataframe ───────────────────────────────────
-                try:
-                    cleaned_df = (
-                        st.session_state.cleaned_df
-                        if "cleaned_df" in st.session_state
-                        else pd.read_csv(st.session_state.csv_path)
-                    )
-                    bin_cols = [(c.replace("_bin", ""), c) for c in cleaned_df.columns if c.endswith("_bin")]
-                except Exception:
-                    cleaned_df = None
-                    bin_cols = []
-
-                # ── AI Key Insights ──────────────────────────────────────────
-                last_content = st.session_state.messages[-1].content if st.session_state.messages else ""
-                if last_content and "FINAL_COMPLETE:" in last_content:
-                    summary_text = last_content.split("FINAL_COMPLETE:")[-1].strip()
-                    lines_s = [l.strip("•-* ").strip() for l in summary_text.split("\n") if l.strip()]
-                    bullets = "".join(f"<li style='margin-bottom:0.3rem;'>{l}</li>" for l in lines_s[:5] if l)
-                    st.markdown(
-                        f'<div class="insight"><strong>🤖 Key Insights from Cleaned Data:</strong>'
-                        f'<ul style="margin:0.5rem 0 0 1.2rem;">{bullets}</ul></div>',
-                        unsafe_allow_html=True
-                    )
-                    st.markdown("<br>", unsafe_allow_html=True)
-
-                # ── Cleaned heatmap ──────────────────────────────────────────
-                fe_heatmap = os.path.join(os.path.dirname(__file__), "charts", "heatmap_correlation_cleaned.png")
-                if os.path.exists(fe_heatmap):
-                    st.markdown('<div class="dp-card-hdr">🌡️ Cleaned Data — Correlation Heatmap</div>', unsafe_allow_html=True)
-                    st.image(fe_heatmap, use_container_width=True)
-                    st.markdown("<br>", unsafe_allow_html=True)
-
-                # ── Final analysis charts (suffix=_final) ───────────────────
-                all_charts  = sorted(glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png")))
-                final_charts = [p for p in all_charts if "_final" in os.path.basename(p)]
+                import glob, os
+                all_charts = sorted(glob.glob(os.path.join(os.path.dirname(__file__), "charts", "*.png")))
+                eda_chart_names = {
+                    os.path.basename(p) for p in all_charts
+                    if (os.path.basename(p).startswith("heatmap_") or
+                        os.path.basename(p).startswith("hist_") or
+                        os.path.basename(p).startswith("scatter_") or
+                        os.path.basename(p).startswith("box_") or
+                        os.path.basename(p).startswith("count_"))
+                    and "cleaned" not in os.path.basename(p)
+                }
+                final_charts = [p for p in all_charts
+                                 if os.path.basename(p) not in eda_chart_names
+                                 and "cleaned" not in os.path.basename(p)]
                 if final_charts:
-                    st.markdown('<div class="dp-card-hdr">📈 Final Analysis Charts</div>', unsafe_allow_html=True)
                     for i in range(0, len(final_charts), 2):
                         row = final_charts[i:i+2]
                         cols = st.columns(len(row))
@@ -1156,87 +945,16 @@ if st.session_state.get("preview_done"):
                                     f'{os.path.splitext(os.path.basename(path))[0]}</div>',
                                     unsafe_allow_html=True
                                 )
-                    st.markdown("<br>", unsafe_allow_html=True)
+                else:
+                    st.info("No new Final charts were generated. Check the previous tabs.")
 
-                # ── Binary feature extraction summary ────────────────────────
-                if bin_cols and cleaned_df is not None:
-                    st.markdown('<div class="dp-card-hdr">⚡ Binarized Features Summary</div>', unsafe_allow_html=True)
-                    rows_html = ""
-                    for orig, binc in bin_cols:
-                        if orig in cleaned_df.columns:
-                            ones  = int(cleaned_df[binc].sum())
-                            zeros = int(len(cleaned_df) - ones)
-                            pct   = round(ones / len(cleaned_df) * 100, 1) if len(cleaned_df) > 0 else 0
-                            o_min  = round(float(cleaned_df[orig].min()), 2)
-                            o_max  = round(float(cleaned_df[orig].max()), 2)
-                            o_mean = round(float(cleaned_df[orig].mean()), 2)
-                        else:
-                            zeros = ones = pct = o_min = o_max = o_mean = "—"
-                        pct_bar = ""
-                        if isinstance(pct, (int, float)):
-                            pct_bar = (
-                                f'<div style="display:flex;align-items:center;gap:0.4rem;">'
-                                f'<div style="flex:1;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;">'
-                                f'<div style="width:{pct}%;height:6px;background:#34d399;border-radius:3px;"></div></div>'
-                                f'<span style="font-size:0.75rem;color:#34d399;">{pct}%</span></div>'
-                            )
-                        rows_html += (
-                            f"<tr>"
-                            f'<td><code style="color:#818cf8;">{orig}</code></td>'
-                            f'<td><code style="color:#34d399;">{binc}</code></td>'
-                            f'<td style="color:rgba(255,255,255,0.5);">{o_min}</td>'
-                            f'<td style="color:rgba(255,255,255,0.5);">{o_max}</td>'
-                            f'<td style="color:rgba(255,255,255,0.5);">{o_mean}</td>'
-                            f'<td style="color:#f87171;">{zeros}</td>'
-                            f'<td style="color:#34d399;">{ones}</td>'
-                            f"<td>{pct_bar}</td>"
-                            f"</tr>"
-                        )
+                last_content = st.session_state.messages[-1].content if st.session_state.messages else ""
+                if last_content and "FINAL_COMPLETE:" in last_content:
+                    summary_text = last_content.split("FINAL_COMPLETE:")[-1].strip()
+                    lines_s = [l.strip("•- ").strip() for l in summary_text.split("\n") if l.strip()]
+                    bullets = "".join(f"<li>{l}</li>" for l in lines_s[:5] if l)
                     st.markdown(
-                        f'''<table class="otable" style="width:100%;">
-                          <thead><tr>
-                            <th>Original Column</th><th>Binary Column</th>
-                            <th>Min</th><th>Max</th><th>Mean</th>
-                            <th style="color:#f87171;">Zeros</th>
-                            <th style="color:#34d399;">Ones</th>
-                            <th>% Positive</th>
-                          </tr></thead>
-                          <tbody>{rows_html}</tbody>
-                        </table>''',
+                        f'<div class="insight"><strong>🤖 Key Insights:</strong>' +
+                        f'<ul style="margin:0.4rem 0 0 1.2rem;">{bullets}</ul></div>',
                         unsafe_allow_html=True
                     )
-                    st.markdown("<br>", unsafe_allow_html=True)
-
-                # ── Full cleaned dataset + download ──────────────────────────
-                if cleaned_df is not None:
-                    _nr2, _nc2 = cleaned_df.shape
-                    st.markdown('<div class="dp-card-hdr">📂 Final Cleaned Dataset</div>', unsafe_allow_html=True)
-                    _sc1, _sc2, _sc3 = st.columns(3)
-                    for _cw, _v, _l, _cl in [
-                        (_sc1, f"{_nr2:,}",       "Total Rows",      "#818cf8"),
-                        (_sc2, f"{_nc2}",          "Total Columns",   "#34d399"),
-                        (_sc3, f"{len(bin_cols)}", "Binary Features", "#f472b6"),
-                    ]:
-                        _cw.markdown(
-                            '<div class="dp-stat">'
-                            f'<span class="val" style="color:{_cl};">{_v}</span>'
-                            f'<span class="lbl">{_l}</span></div>',
-                            unsafe_allow_html=True
-                        )
-                    st.markdown("<br>", unsafe_allow_html=True)
-                    with st.expander("📋 View full cleaned dataset", expanded=False):
-                        st.dataframe(cleaned_df, use_container_width=True)
-                    try:
-                        _csv_bytes_final = cleaned_df.to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            label="📥 Download Final Cleaned Dataset (CSV)",
-                            data=_csv_bytes_final,
-                            file_name="cleaned_dataset.csv",
-                            mime="text/csv",
-                            key="download_cleaned_final",
-                            use_container_width=True,
-                        )
-                    except Exception as _dl_err:
-                        st.error(f"Download error: {_dl_err}")
-                else:
-                    st.info("No final chart data available.")

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(venv/Scripts/python -m pip list)",
+      "Bash(python -c \"import pandas, streamlit, langchain; print\\(''system python OK''\\)\")",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")"
+    ]
+  }
+}

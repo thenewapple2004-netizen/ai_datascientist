@@ -14,6 +14,8 @@ from . import tools
 from .tools import load_csv
 from .llm import get_llm
 
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 # ─── Tool Definitions ─────────────────────────────────────────────────────────
 
 @tool
@@ -197,13 +199,45 @@ FE_TOOLS = [
     tool_drop_useless_columns,
 ]
 
+# ─── Final-phase tool wrappers (force suffix="final" automatically) ───────────
+
+@tool
+def tool_plot_correlation_heatmap_final(dummy: str = "") -> str:
+    """Generates and saves the final correlation heatmap of the cleaned dataset. Call this first."""
+    return tools.plot_correlation_heatmap(tools._df, suffix="final")
+
+
+@tool
+def tool_plot_histogram_final(column_name: str) -> str:
+    """Generates a final univariate histogram with KDE for a continuous numeric column."""
+    return tools.plot_histogram(tools._df, column_name, "final")
+
+
+@tool
+def tool_plot_countplot_final(column_name: str) -> str:
+    """Generates a final univariate countplot for a categorical column."""
+    return tools.plot_countplot(tools._df, column_name, suffix="final")
+
+
+@tool
+def tool_plot_scatterplot_final(x_col: str, y_col: str) -> str:
+    """Generates a final bivariate scatterplot comparing two continuous columns."""
+    return tools.plot_scatterplot(tools._df, x_col, y_col, suffix="final")
+
+
+@tool
+def tool_plot_boxplot_final(x_col: str, y_col: str) -> str:
+    """Generates a final multivariate boxplot: x_col=categorical grouping, y_col=numeric."""
+    return tools.plot_boxplot(tools._df, x_col, y_col, "final")
+
+
 FINAL_TOOLS = [
     tool_get_dataframe_info,
-    tool_plot_correlation_heatmap,
-    tool_plot_histogram,
-    tool_plot_countplot,
-    tool_plot_scatterplot,
-    tool_plot_boxplot,
+    tool_plot_correlation_heatmap_final,
+    tool_plot_histogram_final,
+    tool_plot_countplot_final,
+    tool_plot_scatterplot_final,
+    tool_plot_boxplot_final,
 ]
 
 # ─── Phase Prompts ────────────────────────────────────────────────────────────
@@ -241,14 +275,17 @@ You are an expert AI Data Scientist performing exploratory data analysis.
 
 PHASE 2 — GENERATE INITIAL EDA CHARTS (in order):
 
+MANDATORY FIRST STEP: Call `tool_get_dataframe_info` to read the column names and types before plotting anything.
+
 DATA SCIENCE GUARDRAILS:
 - NEVER plot a zero-variance column (only 1 unique value)
 - NEVER plot ID/index columns (unique values = total rows)
 - NEVER use a categorical column with >20 unique values for boxplot/countplot
 
 YOUR TASKS (in order):
-1. `tool_plot_correlation_heatmap` — always first
-2. Generate the BEST 5-6 charts that reveal initial patterns:
+1. `tool_get_dataframe_info` — ALWAYS call this first to know the columns
+2. `tool_plot_correlation_heatmap` — always second
+3. Generate the BEST 5-6 charts using ONLY columns from step 1:
    - 2-3 Univariate charts (histograms/countplots of most important numerical/categorical features)
    - 2 Bivariate charts (scatterplots of interesting relationships)
    - 1 Multivariate chart (boxplot showing groups)
@@ -297,21 +334,27 @@ FE_COMPLETE:
 """
 
 PHASE_FINAL_PROMPT = """\
-You are an expert AI Data Scientist generating final analysis charts on a cleaned dataset.
+You are an expert AI Data Scientist generating final analysis charts on a fully cleaned and engineered dataset.
 
-PHASE FINAL — FINAL ANALYSIS CHARTS:
-1. Call `tool_get_dataframe_info` to understand the cleaned dataset.
-2. Do NOT generate another heatmap (already done in Feature Engineering).
-3. Generate 5-6 COMPREHENSIVE charts that provide deep insight:
-   - 2 optimized univariate charts (focus on target distribution and key features)
-   - 2 optimized bivariate charts (focus on relationships with the potential target)
-   - 2 optimized multivariate charts (complex interactions, outlier detection via boxplots)
+PHASE FINAL — GENERATE EXACTLY 3 CHARTS IN THIS ORDER:
+1. Call `tool_get_dataframe_info` first to read the available columns.
+2. Call `tool_plot_correlation_heatmap_final` — CHART 1: heatmap of the cleaned data.
+3. Pick the single most informative numeric column and call `tool_plot_histogram_final` — CHART 2: best univariate chart.
+4. Pick the two most correlated numeric columns and call `tool_plot_scatterplot_final` — CHART 3: best bivariate chart.
+   - If no two good numeric columns exist, use `tool_plot_boxplot_final` instead (categorical grouping vs numeric).
 
-CRITICAL: Pass `suffix="final"` for EVERY chart you generate.
-CRITICAL: Only plot columns that CURRENTLY exist per `tool_get_dataframe_info`.
+GUARDRAILS:
+- NEVER plot zero-variance columns (only 1 unique value)
+- NEVER use ID/index columns (unique values ≈ total rows)
+- Use ONLY columns returned by `tool_get_dataframe_info`
+- Do NOT pass any suffix parameter — it is handled automatically by all tools
+- Stop after exactly 3 charts — do not generate more
 
-After all charts, output:
-FINAL_COMPLETE: <3 concise bullet points of key insights>
+After all 3 charts are saved, output exactly:
+FINAL_COMPLETE:
+• [Insight 1 - mentioning Univariate distribution]
+• [Insight 2 - mentioning Bivariate/Correlation findings]
+• [Insight 3 - mentioning Multivariate/Interaction overview]
 """
 
 # ─── Agent Factory ────────────────────────────────────────────────────────────
@@ -346,6 +389,12 @@ def _count_tokens(messages: list) -> dict:
 
 # ─── Main Entry Point ─────────────────────────────────────────────────────────
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((Exception)), # Ideally specify connection errors here
+    reraise=True
+)
 def run_analysis_graph(csv_path: str, messages: list, phase: str = "read") -> dict:
     """
     Run the LangGraph agent for a specific pipeline phase.

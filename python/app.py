@@ -25,7 +25,7 @@ from frontend.components import (
 
 # ─── Page Config ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI Data Scientist",
+    page_title="Smart EDA",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -45,6 +45,18 @@ def clear_charts():
 def _get_image_base64(path: str) -> str:
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
+
+
+def _get_chart_type(path: str) -> str:
+    """Classifies a chart by its filename prefix."""
+    fn = os.path.basename(path).lower()
+    if fn.startswith("hist_") or fn.startswith("count_"):
+        return "Univariate Analysis"
+    if fn.startswith("scatter_"):
+        return "Bivariate Analysis"
+    if fn.startswith("box_") or fn.startswith("heatmap_"):
+        return "Multivariate (Interaction) Analysis"
+    return "Optimized Visualization"
 
 
 # ─── Session State ────────────────────────────────────────────────────────────
@@ -95,11 +107,11 @@ def _accumulate_tokens(res: dict):
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
-    <div style="background:linear-gradient(135deg,rgba(99,102,241,0.1),rgba(139,92,246,0.05));
-                border:1px solid #334155;border-radius:16px;
+    <div style="background:linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.08));
+                border:1px solid #3e5070;border-radius:16px;
                 padding:1.4rem;text-align:center;margin-bottom:1.2rem;">
       <div style="font-size:2.2rem;margin-bottom:0.5rem;">🧠</div>
-      <div style="font-weight:800;font-size:1.1rem;background:linear-gradient(135deg,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">AI Data Scientist</div>
+      <div style="font-weight:800;font-size:1.1rem;background:linear-gradient(135deg,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">Smart EDA</div>
       <div style="font-size:0.75rem;color:#64748b;margin-top:0.3rem;font-weight:500;">
         LangGraph · GPT-4o-mini
       </div>
@@ -172,7 +184,7 @@ with st.sidebar:
 # ─── Hero ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
-  <h1>🧠 AI Data Scientist</h1>
+  <h1>🧠 Smart EDA</h1>
   <p>Upload any CSV — the agent runs full EDA, engineers features, and delivers clean data automatically</p>
   <span class="pill-badge">📊 Auto EDA</span>
   <span class="pill-badge">🔧 Feature Engineering</span>
@@ -358,7 +370,11 @@ if st.session_state.preview_done:
         elif st.session_state.phase2_ready and not st.session_state.eda_done:
             with st.spinner("📊 Generating initial EDA charts…"):
                 try:
-                    res = run_analysis_graph(st.session_state.csv_path, st.session_state.messages, phase="eda")
+                    # Append a HumanMessage so the agent always has a HumanMessage as the last input
+                    eda_messages = list(st.session_state.messages) + [HumanMessage(
+                        content="Now generate the initial EDA charts for this dataset."
+                    )]
+                    res = run_analysis_graph(st.session_state.csv_path, eda_messages, phase="eda")
                     st.session_state.messages           = res["messages"]
                     st.session_state.eda_result         = res
                     st.session_state.eda_result_initial = res
@@ -367,6 +383,7 @@ if st.session_state.preview_done:
                     st.session_state.fe_ready           = True
                     _accumulate_tokens(res)
                 except Exception as e:
+                    st.error(f"❌ EDA Error: {e}")
                     err = {"success": False, "answer": str(e), "error": str(e)}
                     st.session_state.eda_result         = err
                     st.session_state.eda_result_initial = err
@@ -379,7 +396,13 @@ if st.session_state.preview_done:
         elif st.session_state.eda_done:
             eda_res = st.session_state.get("eda_result_initial") or st.session_state.eda_result
             if not eda_res or not eda_res.get("success"):
-                st.error(f"EDA Error: {eda_res.get('error', '') if eda_res else 'No result'}")
+                st.error(f"❌ EDA Error: {eda_res.get('error', '') if eda_res else 'No result'}")
+                st.info("This is often caused by a temporary connection issue. You can try running the analysis again.")
+                if st.button("🔄 Retry EDA Phase", use_container_width=True):
+                    st.session_state.eda_done = False
+                    st.session_state.done     = False
+                    st.session_state.phase2_ready = True # Back to phase 2
+                    st.rerun()
             else:
 
                 eda_charts = sorted([
@@ -457,7 +480,11 @@ if st.session_state.preview_done:
         elif st.session_state.fe_ready and not st.session_state.fe_done and not st.session_state.awaiting_fe_mcq:
             with st.spinner("🔧 AI is planning and applying feature engineering…"):
                 try:
-                    res = run_analysis_graph(st.session_state.csv_path, st.session_state.messages, phase="fe")
+                    # Append a HumanMessage so the agent always has a HumanMessage as the last input
+                    fe_messages = list(st.session_state.messages) + [HumanMessage(
+                        content="Now perform feature engineering on this dataset."
+                    )]
+                    res = run_analysis_graph(st.session_state.csv_path, fe_messages, phase="fe")
                     st.session_state.messages  = res["messages"]
                     st.session_state.fe_result = res
                     _accumulate_tokens(res)
@@ -751,12 +778,18 @@ if st.session_state.preview_done:
         elif st.session_state.final_ready and not st.session_state.done:
             with st.spinner("📈 Generating final optimized charts on cleaned data…"):
                 try:
-                    res = run_analysis_graph(st.session_state.csv_path, st.session_state.messages, phase="final")
+                    # Use a fresh trigger message so the agent isn't confused by full EDA/FE history
+                    final_trigger = [HumanMessage(
+                        content="Generate the final analysis charts for the cleaned dataset. "
+                                "Analyze the data and create all required visualizations."
+                    )]
+                    res = run_analysis_graph(st.session_state.csv_path, final_trigger, phase="final")
                     st.session_state.messages    = res["messages"]
                     st.session_state.done        = True
                     st.session_state.final_ready = False
                     _accumulate_tokens(res)
                 except Exception as e:
+                    st.error(f"❌ Final Analysis Error: {e}")
                     st.session_state.done        = True
                     st.session_state.final_ready = False
             st.rerun()
@@ -787,11 +820,11 @@ if st.session_state.preview_done:
                 )
                 st.markdown("<br>", unsafe_allow_html=True)
 
-            # ── Final Charts (suffix=_final) ──────────────────────────────────
+            # ── Final Charts (suffix=_final) — capped at 3 ───────────────────
             final_charts = sorted([
                 p for p in glob.glob(os.path.join(CHARTS_DIR, "*.png"))
                 if "_final" in os.path.basename(p)
-            ])
+            ])[:3]
             if final_charts:
                 card_header(f"📈 Final Analysis — {len(final_charts)} Optimized Graphs")
                 
@@ -830,9 +863,11 @@ if st.session_state.preview_done:
                     # Current final chart
                     f_current_path = final_charts[st.session_state.final_chart_idx]
                     f_chart_title = os.path.splitext(os.path.basename(f_current_path))[0].replace("_", " ").title()
-                    
+                    f_chart_type  = _get_chart_type(f_current_path)
+
                     st.markdown(f"""
                     <div style="background:#1e293b; border:1px solid #334155; border-radius:32px; padding:2.5rem; margin-top:1.5rem; text-align:center; box-shadow: 0 20px 50px rgba(0,0,0,0.5);">
+                        <div style="color:#818cf8; font-size:0.75rem; font-weight:800; letter-spacing:0.15em; text-transform:uppercase; margin-bottom:0.5rem;">{f_chart_type}</div>
                         <div style="color:#f472b6; font-weight:800; font-size:1.25rem; margin-bottom:1.5rem; letter-spacing:-0.02em;">{f_chart_title}</div>
                         <img src="data:image/png;base64,{_get_image_base64(f_current_path)}" style="width:100%; border-radius:16px; margin-bottom:1.5rem; border:1px solid #334155;">
                         <div style="color:#64748b; font-size:0.9rem; font-weight:700; text-transform:uppercase; letter-spacing:0.05em;">Optimized {st.session_state.final_chart_idx + 1} of {len(final_charts)}</div>
@@ -845,12 +880,17 @@ if st.session_state.preview_done:
                 else:
                     for idx, path in enumerate(final_charts):
                         title = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
+                        ctype = _get_chart_type(path)
                         st.markdown(f'<div style="margin-top:2rem; border-top:1px solid #1e293b; padding-top:1.5rem;">'
+                                    f'<div style="color:#818cf8; font-size:0.7rem; font-weight:800; letter-spacing:0.1em; text-transform:uppercase; margin-bottom:0.4rem;">{ctype}</div>'
                                     f'<div style="color:#f472b6; font-weight:800; font-size:1rem; margin-bottom:1.2rem;">{idx+1}. {title}</div></div>', unsafe_allow_html=True)
                         st.image(path, use_container_width=True)
             else:
-                st.info("📈 Final analysis charts are being generated. Click Refresh if they don't appear.")
-                if st.button("🔄 Refresh Final Charts", use_container_width=True): st.rerun()
+                st.info("📈 Final analysis charts were not detected. Click below to re-run the chart generation.")
+                if st.button("🔄 Regenerate Final Charts", use_container_width=True):
+                    st.session_state.done = False
+                    st.session_state.final_ready = True
+                    st.rerun()
 
             # ── Binary Feature Summary ────────────────────────────────────────
             if bin_cols and cleaned_df is not None:

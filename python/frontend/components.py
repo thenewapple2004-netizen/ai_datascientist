@@ -289,12 +289,11 @@ def generate_pdf_report(
         _thead(headers, widths)
 
         pdf.set_font("Helvetica", "", 8)
-        pdf.set_text_color(0, 0, 0) # Absolute Black for visibility
+        pdf.set_text_color(0, 0, 0)
         for i, col in enumerate(original_df.columns):
             fill = i % 2 == 0
             pdf.set_fill_color(248, 250, 252) if fill else pdf.set_fill_color(255, 255, 255)
             
-            # Get samples
             samples = original_df[col].dropna().unique()[:2]
             sample_str = ", ".join(map(str, samples))[:50]
             
@@ -305,10 +304,36 @@ def generate_pdf_report(
                 str(int(original_df[col].isnull().sum())),
                 sample_str if sample_str else "—"
             ]
-            pdf.set_text_color(0, 0, 0) # Explicitly reset before each row
+            pdf.set_text_color(0, 0, 0)
             for v, w in zip(vals, widths):
                 _cell(w, 8, v, border=1, fill=fill, nl=False, align="C")
             pdf.ln()
+
+        # Detailed Stats for Numeric Columns
+        num_cols = original_df.select_dtypes(include="number").columns
+        if not num_cols.empty:
+            pdf.add_page()
+            _sec("Numerical Feature Statistics", "Detailed descriptive statistics for the numerical features in the dataset.")
+            stats = original_df[num_cols].describe().T.reset_index()
+            s_headers = ["Feature", "Mean", "Std", "Min", "50% (Med)", "Max"]
+            s_widths  = [45, 25, 25, 25, 25, 25]
+            _thead(s_headers, s_widths)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_text_color(0, 0, 0)
+            for i, row in stats.iterrows():
+                fill = i % 2 == 0
+                pdf.set_fill_color(248, 250, 252) if fill else pdf.set_fill_color(255, 255, 255)
+                vals = [
+                    str(row["index"])[:25],
+                    f"{row['mean']:.3f}",
+                    f"{row['std']:.3f}",
+                    f"{row['min']:.3f}",
+                    f"{row['50%']:.3f}",
+                    f"{row['max']:.3f}"
+                ]
+                for v, w in zip(vals, s_widths):
+                    _cell(w, 8, v, border=1, fill=fill, nl=False, align="C")
+                pdf.ln()
 
     # ── EDA Section ──────────────────────────────────────────────────────────
     eda_charts = sorted([
@@ -390,8 +415,9 @@ def generate_pdf_report(
     # ── Final Insights & Charts ──────────────────────────────────────────────
     final_charts    = sorted([p for p in glob.glob(os.path.join(charts_dir, "*.png")) if "_final" in os.path.basename(p)])
     cleaned_heatmap = os.path.join(charts_dir, "heatmap_correlation_cleaned.png")
+    final_heatmap   = os.path.join(charts_dir, "heatmap_correlation_final.png")
 
-    if insights or final_charts or os.path.exists(cleaned_heatmap):
+    if insights or final_charts or os.path.exists(cleaned_heatmap) or os.path.exists(final_heatmap):
         pdf.add_page()
         _sec("Final Insights & Optimized Analysis", "Conclusions drawn from the refined dataset. These findings represent the core value extracted from your data.")
 
@@ -411,13 +437,15 @@ def generate_pdf_report(
                     pdf.ln(2)
             pdf.ln(5)
 
-        if os.path.exists(cleaned_heatmap):
+        # Include either cleaned or final heatmap
+        hmap = final_heatmap if os.path.exists(final_heatmap) else cleaned_heatmap
+        if os.path.exists(hmap):
             if pdf.get_y() > 180: pdf.add_page()
             pdf.set_font("Helvetica", "B", 11)
             pdf.set_text_color(51, 65, 85)
             _cell(0, 8, "Cleaned Feature Correlation Matrix")
             try:
-                pdf.image(cleaned_heatmap, x=20, w=170)
+                pdf.image(hmap, x=20, w=170)
             except Exception:
                 pass
             pdf.ln(10)
@@ -428,12 +456,14 @@ def generate_pdf_report(
             
             title = os.path.splitext(os.path.basename(chart_path))[0].replace("_", " ").title()
             pdf.set_font("Helvetica", "B", 11)
+            pdf.set_text_color(51, 65, 85)
             _cell(0, 8, title)
             try:
                 pdf.image(chart_path, x=20, w=170)
             except Exception:
                 pass
             pdf.ln(10)
+
 
     # ── Conclusion ───────────────────────────────────────────────────────────
     if pdf.get_y() > 220: pdf.add_page()

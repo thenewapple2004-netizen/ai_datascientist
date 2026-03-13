@@ -1,5 +1,7 @@
+# Optimized requirements for faster Streamlit Cloud deployment
+# Using >= to allow pip to select pre-compiled wheels (.whl)
 streamlit>=1.30.0
-pandas>=2.0.0
+pandas>=2.1.0
 matplotlib>=3.3.0
 seaborn>=0.11.0
 langchain>=0.1.0
